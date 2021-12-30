@@ -654,7 +654,7 @@ fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, UNDER | PRIME)
 }
 
-fn get_escaped(c: char) -> char {
+const fn get_escaped(c: char) -> char {
     match c {
         't' => '\t',
         'n' => '\n',
@@ -666,7 +666,7 @@ fn get_escaped(c: char) -> char {
     }
 }
 
-fn is_escapable(c: char) -> bool {
+const fn is_escapable(c: char) -> bool {
     matches!(c, 't' | 'n' | 'r' | '"' | '\'' | '\\')
 }
 

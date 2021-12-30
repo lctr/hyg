@@ -33,9 +33,12 @@ pub trait Peek {
 pub trait Newtype {
     /// The type of the element wrapped by the newtype.
     type Inner;
+
+    /// Standard accessor methods for the inner type.
     fn get(&self) -> Self::Inner;
     fn get_ref(&self) -> &Self::Inner;
     fn get_mut(&mut self) -> &mut Self::Inner;
+
     /// Applies a closure to the owned inner value.
     fn apply<F, X>(&self, f: F) -> X
     where
@@ -43,6 +46,7 @@ pub trait Newtype {
     {
         f(self.get())
     }
+
     /// Applies a closure to a reference of the inner value.
     fn apply_ref<F, X>(&self, f: F) -> X
     where
@@ -52,7 +56,8 @@ pub trait Newtype {
     }
 
     /// Applies a closure to a mutable reference of the inner value.
-    /// *Note*: Unlike the other `apply` methods, this method accepts a closure no return value.
+    /// *Note*: Unlike the other `apply` methods, this method accepts
+    /// a closure and has no return value.
     fn apply_mut<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut Self::Inner),

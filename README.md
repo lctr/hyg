@@ -3,11 +3,14 @@ I've really got an uncreative naming scheme going on here. The name *Hyg* has no
 
 Phew, what a journey. While this project aims to properly exist at some point as a programming language, it is primarily an outcome an interest in learning more about compilers and language design. **For what it's worth,** this personal project is *not* production friendly.
 
-While *Wyg* took advantage of the Deno runtime to form a naïve webscript runtime, *Ryg* was re-imagined as I learned Rust (and admittedly, was essentially my Rust playground project of sorts), *Hyg* aims to incorporate:
+## Goals
+While *Wyg* took advantage of the Deno runtime to form a naïve scripting web-based environment, *Ryg* was re-imagined as I learned Rust (and admittedly, was essentially my Rust playground project of sorts), *Hyg* aims to incorporate:
 
 - Type inference
 - Algebraic data types
 - First class functions
 - Row polymorphism
+- Tree-walking interpreter for AST
+- Bytecode interpreter
 - An Actual Compiler, *ideally* targetting LLVM
 - FFI between Rust, and Haskell, with some support for JavaScript

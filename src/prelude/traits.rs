@@ -56,6 +56,7 @@ pub trait Newtype {
     }
 
     /// Applies a closure to a mutable reference of the inner value.
+    ///
     /// *Note*: Unlike the other `apply` methods, this method accepts
     /// a closure and has no return value.
     fn apply_mut<F>(&mut self, mut f: F)
@@ -65,17 +66,3 @@ pub trait Newtype {
         f(self.get_mut());
     }
 }
-
-// pub trait Text<'t> {
-//     type Txt: Into<Cow<'t, str>> + std::fmt::Display + std::fmt::Debug;
-//     fn text(&'t self) -> Self::Txt;
-//     fn string(&'t self) -> String {
-//         self.text().to_string()
-//     }
-//     fn matches(&'t self, text: Self::Txt) -> bool {
-//         self.string() == text.to_string()
-//     }
-//     fn matches_any_of(&'t self, candidates: &[Self::Txt]) -> bool {
-//         candidates.iter().any(|c| self.string() == c.to_string())
-//     }
-// }

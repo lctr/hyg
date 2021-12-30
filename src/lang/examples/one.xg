@@ -3,9 +3,9 @@
 
 ~~ Bool data type
 ~~ Constructors need not be capitalized, as they're accessed with sigils
-~~ Note: A :: B => :B is of type A 
+~~ Note: A := B => :B is of type A 
 ~~ However it's good practice to capitalize them
-data Bool :: True | False
+data Bool := True | False
 
 ~~ access constructors with sigil prefix. Without the sigil, the following
 ~~ would always return :False, since `True` would be treated as a variable 
@@ -21,3 +21,14 @@ not |x: Bool| := case x of
 ~~ and, after a `->`, have a body that extends as far to the right as possible
 \a b -> a + b       ~~ this lambda
 \a -> \b -> a + b   ~~ is equivalent to this lambda 
+
+~~ 
+data Some x 
+  = None 
+  | Just x
+
+is'Just = \x -> case x of 
+  :Just _ -> :True
+  :None -> :False 
+
+data Result x y = Ok x | Err y

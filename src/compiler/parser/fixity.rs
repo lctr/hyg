@@ -18,6 +18,7 @@ impl Default for Fixity {
     }
 }
 
+#[derive(Debug)]
 pub struct FixityTable {
     operators: HashMap<Operator, Fixity>,
 }
@@ -29,6 +30,9 @@ impl FixityTable {
         }
     }
 
+    /// Insert a new (Operator, Fixity) pair to the operators map.
+    /// This does not check whether a given `Operator` already exists
+    /// in the map, overwriting it if so.
     pub fn insert(&mut self, operator: Operator, fixity: Fixity) {
         self.operators.insert(operator, fixity);
     }
@@ -36,14 +40,14 @@ impl FixityTable {
     pub fn get(&mut self, operator: &Operator) -> Option<&Fixity> {
         self.operators.get(operator)
     }
+}
 
-    // // interface the table's inner map through a closure
-    // pub fn query<F, X>(&mut self, mut f: F) -> X
-    // where
-    //     F: FnMut(&mut HashMap<Operator, Fixity>) -> X,
-    // {
-    //     f(&mut self.operators)
-    // }
+impl Clone for FixityTable {
+    fn clone(&self) -> Self {
+        Self {
+            operators: self.operators.clone(),
+        }
+    }
 }
 
 impl Default for FixityTable {

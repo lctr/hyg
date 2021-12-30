@@ -54,6 +54,8 @@ impl<'t> Positioned for Source<'t> {
 
 impl<'t> Peek for Source<'t> {
     type Item = char;
+
+    #[inline]
     fn peek(&mut self) -> Option<&Self::Item> {
         self.chars.peek()
     }

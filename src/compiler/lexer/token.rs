@@ -230,11 +230,10 @@ impl std::fmt::Display for Token {
             Token::Kw(kw) => write!(f, "{}", kw.as_str()),
             Token::Comment(c) => write!(f, "{:?}", c),
             Token::Operator(Operator::Reserved(o)) => write!(f, "{}", o),
-            Token::Operator(Operator::Custom(s))
-            | Token::Ident(s)
-            | Token::Sym(s)
-            // | Token::Meta(s)
-            | Token::Str(s) => write!(f, "{}", s),
+            Token::Operator(Operator::Custom(s)) | Token::Ident(s) | Token::Str(s) => {
+                write!(f, "{}", s)
+            }
+            Token::Sym(s) => write!(f, ":{}", s),
             Token::Char(c) => write!(f, "{}", c),
             Token::Num { data, .. } => write!(f, "{}", data),
             Token::Bytes(bytes) => write!(
@@ -245,7 +244,7 @@ impl std::fmt::Display for Token {
             Token::Lambda => write!(f, "\\"),
             Token::Eq => write!(f, "="),
             Token::Underscore => write!(f, "_"),
-            Token::ColonEq => write!(f,":="),
+            Token::ColonEq => write!(f, ":="),
             Token::At => write!(f, "@"),
             Token::Dot => write!(f, "."),
             Token::Dot2 => write!(f, ".."),
@@ -265,7 +264,11 @@ impl std::fmt::Display for Token {
             Token::Pipe => write!(f, "|"),
             Token::ArrowR => write!(f, "->"),
             Token::ArrowL => write!(f, "<-"),
-            Token::Error { data: val, msg, pos } => write!(f, "Invalid: `{}`: {} at {}", val, msg, pos),
+            Token::Error {
+                data: val,
+                msg,
+                pos,
+            } => write!(f, "Invalid: `{}`: {} at {}", val, msg, pos),
             Token::Eof => write!(f, "\0"),
         }
     }

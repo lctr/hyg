@@ -10,7 +10,9 @@ data Bool :: True | False
 ~~ access constructors with sigil prefix. Without the sigil, the following
 ~~ would always return :False, since `True` would be treated as a variable 
 ~~ pattern. 
-not = case x of 
+~~ top level functions allow for strict syntax, where function parameters
+~~ are annotated in a manner similar to annotated lambda arguments in Rust.
+not |x: Bool| := case x of 
     :True -> :False
     :False -> :True
 

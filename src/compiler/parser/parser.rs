@@ -732,9 +732,7 @@ impl<'t> Parser<'t> {
                     &mut Self::lambda_arg,
                 )
                 .and_then(|pats| Ok(List(pats))),
-                
-            Some(Underscore) => Ok(Wild),
-            
+                            
             // A constructor pattern begins with a symbol and extends as far to the right as possible
             Some(Sym(..)) => {
                 let first = self.take_next(); 

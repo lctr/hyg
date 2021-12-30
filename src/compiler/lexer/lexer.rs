@@ -1,6 +1,10 @@
-
+use super::{
+    source::Source,
+    span::Location,
+    token::{BinOp, Comment, Keyword, NumFlag, Operator, Token},
+    Positioned,
+};
 use crate::prelude::traits::Peek;
-use super::{source::Source, span::Location, token::{Token, Keyword, Operator, BinOp, Comment, NumFlag}, Positioned};
 
 pub const COMMENT_OUTER: char = '*';
 pub const COMMENT_INNER: char = '~';
@@ -18,12 +22,12 @@ pub struct Lexer<'t> {
     source: Source<'t>,
     current: Option<Token>,
     queue: Vec<Token>,
-    spans: Vec<Location>
+    spans: Vec<Location>,
 }
 
 impl<'t> Positioned for Lexer<'t> {
     type Loc = Location;
-    
+
     fn loc(&self) -> Self::Loc {
         self.source.loc()
     }
@@ -35,7 +39,7 @@ impl<'t> Lexer<'t> {
             source: Source::new(src),
             current: None,
             queue: vec![],
-            spans: vec![]
+            spans: vec![],
         }
     }
 
@@ -82,7 +86,7 @@ impl<'t> Lexer<'t> {
         }
         buf
     }
-    
+
     fn eat_whitespace(&mut self) {
         self.next_while(|c| c.is_whitespace());
     }
@@ -107,7 +111,7 @@ impl<'t> Lexer<'t> {
         match c {
             COMMENT_INNER => self.comment(),
             ';' => {
-                self.next_char(); 
+                self.next_char();
                 Token::Semi
             }
             '\'' => self.character(),
@@ -123,7 +127,7 @@ impl<'t> Lexer<'t> {
             }
             t if "()[]{},;".contains(t) => {
                 self.next_char();
-                use Token::*; 
+                use Token::*;
                 match t {
                     '(' => ParenL,
                     ')' => ParenR,
@@ -133,7 +137,7 @@ impl<'t> Lexer<'t> {
                     '}' => CurlyR,
                     ',' => Comma,
                     ';' => Semi,
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 }
             }
             '.' => self.dot(),
@@ -168,7 +172,7 @@ impl<'t> Lexer<'t> {
         match self.peek_char().copied() {
             Some(c) => {
                 if c == ESCAPE {
-                    self.next_char(); 
+                    self.next_char();
                     match self.peek_char().copied() {
                         Some(c) if is_escapable(c) => {
                             self.next_char();
@@ -176,20 +180,23 @@ impl<'t> Lexer<'t> {
                                 self.next_char();
                                 Token::Char(get_escaped(c))
                             } else {
-                                self.next_char(); 
+                                self.next_char();
                                 Token::Error {
                                     data: format!("{}", c),
-                                    msg: format!("Unclosed character! Expected `'` after escape {}", c),
-                                    pos
+                                    msg: format!(
+                                        "Unclosed character! Expected `'` after escape {}",
+                                        c
+                                    ),
+                                    pos,
                                 }
                             }
-                        },
+                        }
                         invalid @ _ => {
                             self.next_char();
                             Token::Error {
                                 data: format!("{:?}", invalid),
                                 msg: format!("Invalid character escape!"),
-                                pos
+                                pos,
                             }
                         }
                     }
@@ -201,7 +208,7 @@ impl<'t> Lexer<'t> {
                         Token::Error {
                             data: format!("{}", c),
                             msg: format!("Unclosed character! Expected `'` after char {}", c),
-                            pos
+                            pos,
                         }
                     }
                 }
@@ -209,8 +216,8 @@ impl<'t> Lexer<'t> {
             None => Token::Error {
                 data: "'".into(),
                 msg: "Unexpected end of input after first `'`!".into(),
-                pos
-            }
+                pos,
+            },
         }
     }
 
@@ -218,7 +225,7 @@ impl<'t> Lexer<'t> {
         self.next_char();
         match self.peek_char().copied() {
             Some(':') => {
-                self.next_char(); 
+                self.next_char();
                 Token::Colon2
             }
             Some('=') => {
@@ -226,16 +233,12 @@ impl<'t> Lexer<'t> {
                 Token::ColonEq
             }
             Some(c) if OP_CHARS.contains(c) => {
-                Token::Ident(
-                    format!(":{}",
-                    self.next_while(|c| OP_CHARS.contains(c))))
+                Token::Ident(format!(":{}", self.next_while(|c| OP_CHARS.contains(c))))
             }
-            Some(c) if c.is_ascii_lowercase() => {
-                Token::Sym(
-                    format!(":{}", 
-                    self.next_while(|c| c.is_ascii_alphabetic())))
+            Some(c) if is_ident_start(c) => {
+                Token::Sym(self.next_while(|c| is_ident_char(c)))
             }
-            _ => Token::Colon
+            _ => Token::Colon,
         }
     }
 
@@ -246,14 +249,14 @@ impl<'t> Lexer<'t> {
             Some('.') => {
                 self.next_char();
                 match self.peek_char().copied() {
-                    Some('.') => { 
-                        self.next_char(); 
+                    Some('.') => {
+                        self.next_char();
                         Token::Dot3
                     }
-                    _ => Token::Dot2
+                    _ => Token::Dot2,
                 }
             }
-            _ => Token::Dot
+            _ => Token::Dot,
         }
     }
 
@@ -290,11 +293,10 @@ impl<'t> Lexer<'t> {
     }
 
     fn ident(&mut self, _start: char) -> Token {
-        let buf = self.next_while(|c| is_ident_char(c)); 
+        let buf = self.next_while(|c| is_ident_char(c));
         if matches!(buf.as_str(), "_") {
             Token::Underscore
-        } else
-        if let Some(kw) = Keyword::from_str(&*buf) {
+        } else if let Some(kw) = Keyword::from_str(&*buf) {
             Token::Kw(kw)
         } else {
             Token::Ident(buf)
@@ -315,7 +317,7 @@ impl<'t> Lexer<'t> {
         const ZERO: char = '0';
         // counter for instances of (valid) `+` or `-` encountered. Should only be 0 or 1. If this is 1, then the flag is `NumFlag::Sci`.
         let mut sciop: u8 = 0;
-        
+
         if let Some(&ZERO) = self.peek_char() {
             self.next_char();
             match self.peek_char().copied() {
@@ -326,13 +328,14 @@ impl<'t> Lexer<'t> {
                     return self.integer(NumFlag::Oct);
                 }
                 Some('x' | 'X') => return self.integer(NumFlag::Hex),
-                Some(d@'.') => {
+                Some(d @ '.') => {
                     match self.dot() {
-                        dot @ (
-                        Token::Dot2 |
-                        Token::Dot3) => {
+                        dot @ (Token::Dot2 | Token::Dot3) => {
                             self.queue.push(dot);
-                            return Token::Num { data: "0".into(), flag}
+                            return Token::Num {
+                                data: "0".into(),
+                                flag,
+                            };
                         }
                         Token::Dot => {
                             flag = NumFlag::Dec;
@@ -340,28 +343,32 @@ impl<'t> Lexer<'t> {
                             data.push(d);
                         }
                         // since we've confirmed above the preceding token was Token::Dot
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     }
                 }
-                Some(exp@('e' | 'E')) => {
+                Some(exp @ ('e' | 'E')) => {
                     flag = NumFlag::Sci;
-                    data.push(exp); 
+                    data.push(exp);
                     self.next_char();
                 }
                 Some(_) => {
                     let pos = self.loc();
-                    return self.next_char()
-                        .and_then(|val| Some(Token::Error {
-                            data, 
-                            msg: format!("Character {} after initial `0` not supported!", val), 
-                            pos
-                        })).unwrap()
+                    return self
+                        .next_char()
+                        .and_then(|val| {
+                            Some(Token::Error {
+                                data,
+                                msg: format!("Character {} after initial `0` not supported!", val),
+                                pos,
+                            })
+                        })
+                        .unwrap();
                 }
                 // unreachble since this only runs on the first digit. Since this method was triggered by a digit char, we can be secure in this branch not being possible.
-                None => unreachable!()
+                None => unreachable!(),
             }
         };
-        
+
         let mut first = true;
         while let Some(&c) = self.peek_char() {
             // self.next_char();
@@ -371,11 +378,11 @@ impl<'t> Lexer<'t> {
                     return Token::Error{ 
                         data: c.into(), 
                         msg: format!("Invalid sequence after partial lexer result `{}`! Expected a digit, but found `{}`", data, c), 
-                        pos: self.loc()}
+                        pos: self.loc()};
                 }
             };
             match c {
-                '_' if data.ends_with(|ch: char| ch.is_digit(10)) => { 
+                '_' if data.ends_with(|ch: char| ch.is_digit(10)) => {
                     // no-op, underscores wedged between digits are separators
                 }
                 '0'..='9' => data.push(c),
@@ -387,13 +394,13 @@ impl<'t> Lexer<'t> {
                             There may only be one instance of the infix `{}` in the representation of a floating point number. \n\
                             Input lexed: {}", c, &data), 
                             data, 
-                            pos: self.loc() }
+                            pos: self.loc() };
                     } else {
                         flag = NumFlag::Sci;
                         data.push(c);
                     }
                 }
-                '+'|'-' => {
+                '+' | '-' => {
                     if sciop == 0 && flag == NumFlag::Sci {
                         if data.ends_with(|c| c == 'e' || c == 'E') {
                             sciop += 1;
@@ -403,14 +410,16 @@ impl<'t> Lexer<'t> {
                                 data: c.into(),
                                 msg: format!("The characters `{}` may only come after an exponential infix `e` or `E` for floating point numbers. Lexed: `{}`", c, data),
                                 pos: self.loc()
-                            }
+                            };
                         }
                     } else if data.ends_with('.') {
-                        return Token::Error{ 
+                        return Token::Error {
                             msg: format!(
-                                "Invalid exponential infix! Unable to lex `{}` + `{}`", &data, c), 
-                            data, 
-                            pos: self.loc() 
+                                "Invalid exponential infix! Unable to lex `{}` + `{}`",
+                                &data, c
+                            ),
+                            data,
+                            pos: self.loc(),
                         };
                     } else {
                         // the `+` and `-` as operators for next token
@@ -447,10 +456,10 @@ impl<'t> Lexer<'t> {
                             };
                         }
                         // other numeric flags should have been re-routed to the `integer` method by now
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     }
                 }
-                _ => break
+                _ => break,
             }
             self.next_char();
         }
@@ -462,12 +471,12 @@ impl<'t> Lexer<'t> {
     fn integer(&mut self, flag: NumFlag) -> Token {
         let mut data = format!("0{}", flag.as_str());
         // we start off on the 2nd character of the int prefix, so we eat it and incidentally know only 3 of the 5 NumFlag variants may show up
-        self.next_char(); 
+        self.next_char();
         let base = match flag {
             NumFlag::Bin => 2,
             NumFlag::Oct => 8,
             NumFlag::Hex => 16,
-            _ => unreachable!()
+            _ => unreachable!(),
         };
         while let Some(&c) = self.peek_char() {
             self.next_char();
@@ -481,23 +490,24 @@ impl<'t> Lexer<'t> {
                         return Token::Error {
                             msg: format!(
                                 "Found `{}` while lexing an \
-                                integer {} with flag {:?}", 
-                                dot, &data, flag),
+                                integer {} with flag {:?}",
+                                dot, &data, flag
+                            ),
                             data,
-                            pos: self.loc()
-                        }
+                            pos: self.loc(),
+                        };
                     }
-                },
+                }
                 d if d.is_digit(base) => {
                     data.push(d);
                 }
-                _ => break
+                _ => break,
             }
-        };
+        }
 
         Token::Num { data, flag }
     }
-    
+
     fn operator(&mut self) -> Token {
         let buf = self.next_while(|c| OP_CHARS.contains(c));
         match buf.as_str() {
@@ -508,13 +518,14 @@ impl<'t> Lexer<'t> {
             "\\" => Token::Lambda,
             "->" => Token::ArrowR,
             "<-" => Token::ArrowL,
-            s => if let Some(op) = BinOp::from_str(s) {
-                Token::Operator(Operator::Reserved(op))
-            } else { 
-                Token::Operator(buf.into())
+            s => {
+                if let Some(op) = BinOp::from_str(s) {
+                    Token::Operator(Operator::Reserved(op))
+                } else {
+                    Token::Operator(buf.into())
+                }
             }
         }
-        
     }
 
     fn prefix(&mut self, c: char) -> Token {
@@ -526,7 +537,7 @@ impl<'t> Lexer<'t> {
                 match self.peek_char().copied() {
                     Some('"') => {
                         let tok = self.string();
-                        if let Token::Str (bs) = tok {
+                        if let Token::Str(bs) = tok {
                             Token::Bytes(bs.into_bytes())
                         } else {
                             tok
@@ -590,7 +601,7 @@ impl<'t> Lexer<'t> {
                 buf.push(c);
             }
         }
-        Token::Str (buf)
+        Token::Str(buf)
     }
 
     fn unknown(&mut self, c: char) -> Token {
@@ -611,7 +622,7 @@ impl<'t> Iterator for Lexer<'t> {
             Some(t) => Some(t),
             None => match self.token() {
                 Token::Eof => None,
-                tok => Some(tok)
+                tok => Some(tok),
             },
         }
     }
@@ -620,7 +631,7 @@ impl<'t> Iterator for Lexer<'t> {
 /// Note: The actual Lexer doesn't use either `Peek` nor `Iterator` on itself.
 impl<'t> Peek for Lexer<'t> {
     type Item = Token;
-        /// Returns a reference to the current Token, if any. Primarily used by Parser.
+    /// Returns a reference to the current Token, if any. Primarily used by Parser.
     fn peek(&mut self) -> Option<&Self::Item> {
         if let Some(ref t) = self.current {
             Some(t)
@@ -631,7 +642,7 @@ impl<'t> Peek for Lexer<'t> {
         }
     }
     fn is_done(&mut self) -> bool {
-       self.source.is_done() && self.current.is_none() 
+        self.source.is_done() && self.current.is_none()
     }
 }
 
@@ -680,52 +691,100 @@ mod test {
     fn test_numbers() {
         let lexer = Lexer::new("1 1.2 3 4e20 0xfff 5..6 0 0..5");
         let expected = &[
-            Token::Num { data: "1".into(), flag: NumFlag::Int },
-            Token::Num { data: "1.2".into(), flag: NumFlag::Dec },
-            Token::Num { data: "3".into(), flag: NumFlag::Int },
-            Token::Num { data: "4e20".into(), flag: NumFlag::Sci },
-            Token::Num { data: "0xfff".into(), flag: NumFlag::Hex },
-            Token::Num { data: "5".into(), flag: NumFlag::Int },
+            Token::Num {
+                data: "1".into(),
+                flag: NumFlag::Int,
+            },
+            Token::Num {
+                data: "1.2".into(),
+                flag: NumFlag::Dec,
+            },
+            Token::Num {
+                data: "3".into(),
+                flag: NumFlag::Int,
+            },
+            Token::Num {
+                data: "4e20".into(),
+                flag: NumFlag::Sci,
+            },
+            Token::Num {
+                data: "0xfff".into(),
+                flag: NumFlag::Hex,
+            },
+            Token::Num {
+                data: "5".into(),
+                flag: NumFlag::Int,
+            },
             Token::Dot2,
-            Token::Num { data: "6".into(), flag: NumFlag::Int },
-            Token::Num { data: "0".into(), flag: NumFlag::Int },
-            Token::Num { data: "0".into(), flag: NumFlag::Int },
+            Token::Num {
+                data: "6".into(),
+                flag: NumFlag::Int,
+            },
+            Token::Num {
+                data: "0".into(),
+                flag: NumFlag::Int,
+            },
+            Token::Num {
+                data: "0".into(),
+                flag: NumFlag::Int,
+            },
             Token::Dot3,
-            Token::Num { data: "5".into(), flag: NumFlag::Int }
+            Token::Num {
+                data: "5".into(),
+                flag: NumFlag::Int,
+            },
         ];
 
-        lexer.into_iter().zip(expected.iter()).for_each(|(t1, t2)| assert_eq!(&t1, t2));
+        lexer
+            .into_iter()
+            .zip(expected.iter())
+            .for_each(|(t1, t2)| assert_eq!(&t1, t2));
     }
 
     #[test]
     fn lex_chars() {
         let lexer = Lexer::new("a 1; . | # @ ## #> .. 3...5 'a' :b -> 2.0 <-");
-     
+
         let expected = [
-            Token::Ident("a".into()), 
-            Token::Num { data: "1".into(), flag: NumFlag::Int}, 
-            Token::Semi, 
+            Token::Ident("a".into()),
+            Token::Num {
+                data: "1".into(),
+                flag: NumFlag::Int,
+            },
+            Token::Semi,
             Token::Dot,
             Token::Pipe,
-            Token::Pound, 
-            Token::At, 
-            Token::Operator(Operator::Custom("##".into())), 
+            Token::Pound,
+            Token::At,
+            Token::Operator(Operator::Custom("##".into())),
             Token::Operator(Operator::Custom("#>".into())),
-            Token::Dot2, 
-            Token::Num { data: "3".into(), flag: NumFlag::Int}, 
+            Token::Dot2,
+            Token::Num {
+                data: "3".into(),
+                flag: NumFlag::Int,
+            },
             Token::Dot3,
-            Token::Num { data: "5".into(), flag: NumFlag::Int}, 
-            Token::Char('a'), 
-            Token::Sym(":b".into()), 
-            Token::ArrowR, 
-            Token::Num{data:"2.0".into(), flag: NumFlag::Dec }, 
-            Token::ArrowL, 
+            Token::Num {
+                data: "5".into(),
+                flag: NumFlag::Int,
+            },
+            Token::Char('a'),
+            Token::Sym(":b".into()),
+            Token::ArrowR,
+            Token::Num {
+                data: "2.0".into(),
+                flag: NumFlag::Dec,
+            },
+            Token::ArrowL,
         ];
 
-        lexer.into_iter().zip(expected.iter()).for_each(|(res, tok)| {
-            println!("{}", &res);
-            assert_eq!(&res, tok)
-        });
+        lexer
+            .into_iter()
+            .zip(expected.iter())
+            .for_each(|(res, tok)| {
+                println!("{}", &res);
+                assert_eq!(&res, tok)
+            });
     }
 
     #[test]
@@ -741,10 +800,13 @@ mod test {
         assert_eq!(lexer.next(), Some(Token::CurlyL));
         assert_eq!(lexer.next(), Some(Token::CurlyR));
         assert_eq!(lexer.next(), Some(Token::Operator(BinOp::Plus.into())));
-        assert_eq!(lexer.next(), Some(Token::Num { 
-            data: "1.2".into(), 
-            flag: NumFlag::Dec
-        }));
+        assert_eq!(
+            lexer.next(),
+            Some(Token::Num {
+                data: "1.2".into(),
+                flag: NumFlag::Dec
+            })
+        );
         assert!(lexer.is_done());
         assert_eq!(lexer.next(), None)
     }

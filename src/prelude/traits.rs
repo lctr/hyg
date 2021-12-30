@@ -3,10 +3,8 @@
 pub trait Peek {
     type Item: std::cmp::PartialEq + Default;
 
-    #[inline]
     fn peek(&mut self) -> Option<&Self::Item>;
 
-    #[inline]
     fn is_done(&mut self) -> bool;
     fn match_curr(&mut self, item: &Self::Item) -> bool {
         if let Some(t) = self.peek() {

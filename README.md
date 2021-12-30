@@ -9,7 +9,7 @@ While *Wyg* took advantage of the Deno runtime to form a naïve scripting web-ba
 - Type inference
 - Algebraic data types
 - First class functions
-- Row polymorphism
+- Parametric polymorphism
 - Tree-walking interpreter for AST
 - Bytecode interpreter
 - An Actual Compiler, *ideally* targetting LLVM

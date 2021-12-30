@@ -19,8 +19,8 @@ macro_rules! strenum {
             $(
                 $(#[$metas])*
                 #[doc = $lit]
-                $name,
-            )+
+                $name
+            ),+
         }
 
         impl std::fmt::Display for $opk {

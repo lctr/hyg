@@ -37,23 +37,20 @@ macro_rules! strenum {
         impl $opk {
             pub fn $is_kind(word: &str) -> bool {
                 match word {
-                    $($lit => true,)+
+                    $($lit => {true})+
                     _ => false
                 }
             }
             pub fn from_str(s: &str) -> Option<Self> {
                 match s {
-                    $($lit => Some($opk::$name),)+
+                    $($lit => {Some($opk::$name)})+
                     _ => None
                 }
             }
             pub fn as_str(&self) -> &str {
-                let s = match self {
-                    $($opk::$name => $lit,)+
-                    _ => ""
-                };
-                s
-
+                match self {
+                    $($opk::$name => {$lit})+
+                }
             }
         }
     };
@@ -71,13 +68,13 @@ macro_rules! strenum {
         impl $id {
             pub fn get_prec(&self) -> usize {
                 match self {
-                    $($($id::$name => $prec,)+)+
+                    $($($id::$name => {$prec})+)+
                 }
             }
 
             pub fn get_assoc(&self) -> Assoc {
                 match self {
-                    $($($id::$name => strenum!($assoc),)+)+
+                    $($($id::$name => {strenum!($assoc)})+)+
                 }
             }
 

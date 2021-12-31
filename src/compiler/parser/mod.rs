@@ -1,8 +1,7 @@
 mod fixity;
 mod parser;
-mod syntax;
-mod traits;
+mod scan;
 
 pub use super::lexer::{
-    Assoc, BinOp, Comment, Keyword, Lexer, Operator, Peek, Positioned, Span, Token,
+    Assoc, BinOp, Comment, Keyword, Lexer, Operator, Token,
 };

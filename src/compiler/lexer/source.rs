@@ -1,8 +1,9 @@
 use std::{iter::Peekable, str::Chars};
 
-pub use crate::prelude::traits::Peek;
-
-pub use super::span::{Location, Positioned};
+pub use crate::prelude::{
+    span::{Location, Positioned},
+    traits::Peek,
+};
 
 #[derive(Clone, Debug)]
 pub struct Source<'s> {
@@ -13,7 +14,12 @@ pub struct Source<'s> {
 }
 
 impl<'s> Source<'s> {
+    /// Reset row += 1
     const LF: char = '\n';
+    /// Treated as two spaces
+    const TAB: char = '\t';
+    /// Ignored; NO-OP
+    const CR: char = '\r';
 
     pub fn new(src: &'s str) -> Self {
         Self {
@@ -25,11 +31,21 @@ impl<'s> Source<'s> {
     }
 
     fn sync_pos(&mut self, c: char) {
-        if c == Self::LF {
-            self.loc.reset_row()
-        } else {
-            self.loc.reset_column()
+        match c {
+            Self::LF => self.loc.incr_row(),
+            Self::TAB => {
+                for i in 0..2 {
+                    self.loc.incr_row();
+                }
+            }
+            Self::CR => {}
+            _ => self.loc.incr_column(),
         }
+        // if c == Self::LF {
+        //     self.loc.reset_row()
+        // } else {
+        //     self.loc.reset_column()
+        // }
     }
 }
 
@@ -53,10 +69,10 @@ impl<'t> Positioned for Source<'t> {
 }
 
 impl<'t> Peek for Source<'t> {
-    type Item = char;
+    type Peeked = char;
 
     #[inline]
-    fn peek(&mut self) -> Option<&Self::Item> {
+    fn peek(&mut self) -> Option<&Self::Peeked> {
         self.chars.peek()
     }
     fn is_done(&mut self) -> bool {
@@ -85,7 +101,9 @@ mod test {
     fn test_for_each() {
         let src = "hello world";
         let stream = Source::new(src);
-        stream.zip(src.chars()).for_each(|(x, y)| assert_eq!(x, y));
+        stream
+            .zip(src.chars())
+            .for_each(|(x, y)| assert_eq!(x, y));
     }
 
     #[test]
@@ -111,9 +129,11 @@ mod test {
         use std::io::Read;
         let file = std::fs::File::open("Cargo.toml");
         if let Ok(file) = file {
-            let mut buf_reader = std::io::BufReader::new(file);
+            let mut buf_reader =
+                std::io::BufReader::new(file);
             let mut contents = String::new();
-            let _ = buf_reader.read_to_string(&mut contents);
+            let _ =
+                buf_reader.read_to_string(&mut contents);
             println!("contents {}", contents);
         }
     }

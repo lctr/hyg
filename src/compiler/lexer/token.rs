@@ -1,6 +1,6 @@
 use crate::strenum;
 
-use super::span::Location;
+use super::Location;
 
 strenum! { Keyword is_kw ::
     Do      "do"
@@ -40,6 +40,19 @@ pub enum Assoc {
     Left,
     Right,
     // None,
+}
+
+impl Assoc {
+    /// Utility matching functions as for brevity when using in parser
+    #[inline]
+    pub fn is_left(&self) -> bool {
+        matches!(self, Self::Left)
+    }
+
+    #[inline]
+    pub fn is_right(&self) -> bool {
+        !self.is_left()
+    }
 }
 
 strenum! { each BinOp is_binary ::
@@ -99,7 +112,10 @@ impl From<String> for Operator {
 }
 
 impl std::fmt::Display for Operator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         match self {
             Operator::Reserved(x) => write!(f, "{}", x),
             Operator::Custom(x) => write!(f, "{}", x),
@@ -225,21 +241,33 @@ impl Default for Token {
 }
 
 impl std::fmt::Display for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         match self {
             Token::Kw(kw) => write!(f, "{}", kw.as_str()),
             Token::Comment(c) => write!(f, "{:?}", c),
-            Token::Operator(Operator::Reserved(o)) => write!(f, "{}", o),
-            Token::Operator(Operator::Custom(s)) | Token::Ident(s) | Token::Str(s) => {
+            Token::Operator(Operator::Reserved(o)) => {
+                write!(f, "{}", o)
+            }
+            Token::Operator(Operator::Custom(s))
+            | Token::Ident(s)
+            | Token::Str(s) => {
                 write!(f, "{}", s)
             }
             Token::Sym(s) => write!(f, ":{}", s),
             Token::Char(c) => write!(f, "{}", c),
-            Token::Num { data, .. } => write!(f, "{}", data),
+            Token::Num { data, .. } => {
+                write!(f, "{}", data)
+            }
             Token::Bytes(bytes) => write!(
                 f,
                 "{}",
-                bytes.iter().map(|b| *b as char).collect::<String>()
+                bytes
+                    .iter()
+                    .map(|b| *b as char)
+                    .collect::<String>()
             ),
             Token::Lambda => write!(f, "\\"),
             Token::Eq => write!(f, "="),
@@ -268,7 +296,11 @@ impl std::fmt::Display for Token {
                 data: val,
                 msg,
                 pos,
-            } => write!(f, "Invalid: `{}`: {} at {}", val, msg, pos),
+            } => write!(
+                f,
+                "Invalid: `{}`: {} at {}",
+                val, msg, pos
+            ),
             Token::Eof => write!(f, "\0"),
         }
     }

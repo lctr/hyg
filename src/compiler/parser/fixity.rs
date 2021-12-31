@@ -33,11 +33,18 @@ impl FixityTable {
     /// Insert a new (Operator, Fixity) pair to the operators map.
     /// This does not check whether a given `Operator` already exists
     /// in the map, overwriting it if so.
-    pub fn insert(&mut self, operator: Operator, fixity: Fixity) {
+    pub fn insert(
+        &mut self,
+        operator: Operator,
+        fixity: Fixity,
+    ) {
         self.operators.insert(operator, fixity);
     }
 
-    pub fn get(&mut self, operator: &Operator) -> Option<&Fixity> {
+    pub fn get(
+        &mut self,
+        operator: &Operator,
+    ) -> Option<&Fixity> {
         self.operators.get(operator)
     }
 }

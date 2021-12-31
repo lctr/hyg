@@ -1,11 +1,12 @@
-use crate::compiler::lexer::{
-    BinOp, Keyword, Lexer, Location, Operator, Peek, Positioned, Span, Token,
-};
+use crate::{compiler::lexer::{
+    BinOp, Keyword, Lexer, Operator, Peek, Token,
+}, prelude::span::{Location, Positioned}};
+
+use crate::compiler::syntax::{expr::{Expr, Match,  Section, Var}, literal::{Literal, LitErr}, pattern::Pat};
 
 use super::{
-    fixity::{Fixity, FixityTable},
-    syntax::{Arity, Expr, Literal, Match, Pat, Section, Var},
-    traits::{Combinator, Consume},
+    fixity::{Fixity, FixityTable}, 
+    scan::{Combinator, Consume},
     Comment,
 };
 
@@ -36,8 +37,8 @@ impl<'t> From<&'t str> for Parser<'t> {
 }
 
 impl<'t> Peek for Parser<'t> {
-    type Item = Token;
-    fn peek(&mut self) -> Option<&Self::Item> {
+    type Peeked = Token;
+    fn peek(&mut self) -> Option<&Self::Peeked> {
         self.lexer.peek()
     }
     fn is_done(&mut self) -> bool {
@@ -55,7 +56,7 @@ impl<'t> Positioned for Parser<'t> {
 impl<'t> Consume<'t> for Parser<'t> {
     type Error = SyntaxError;
 
-    fn eat(&mut self, token: &<Self as Peek>::Item) -> Result<&mut Self, Self::Error> {
+    fn eat(&mut self, token: &<Self as Peek>::Peeked) -> Result<&mut Self, Self::Error> {
         if self.match_curr(token) {
             self.lexer.next();
             Ok(self)
@@ -69,7 +70,7 @@ impl<'t> Consume<'t> for Parser<'t> {
         }
     }
 
-    fn take_next(&mut self) -> <Self as Peek>::Item {
+    fn take_next(&mut self) -> <Self as Peek>::Peeked {
         match self.lexer.next() {
             Some(t) => t,
             _ => Token::Eof,
@@ -78,8 +79,8 @@ impl<'t> Consume<'t> for Parser<'t> {
 
     fn unexpected(
         &mut self,
-        expected: &<Self as Peek>::Item,
-        actual: &<Self as Peek>::Item,
+        expected: &<Self as Peek>::Peeked,
+        actual: &<Self as Peek>::Peeked,
         pos: Option<Self::Loc>,
     ) -> Self::Error {
         SyntaxError(format!(
@@ -129,7 +130,7 @@ impl<'t> Parser<'t> {
                 None
             }
         } {
-            if min_prec < prec || (min_prec == prec && matches!(assoc, super::Assoc::Right)) {
+            if min_prec < prec || (min_prec == prec && assoc.is_right()) {
                 // since we know the token will contain an `Operator`, this is safe to unwrap
                 let op = self.take_next().as_operator().unwrap();
                 let right = self.binary(prec, f)?;
@@ -175,7 +176,6 @@ impl<'t> Parser<'t> {
     }
 
     fn case_arms(&mut self) -> Result<(Match, Expr), SyntaxError> {
-        println!("{:?}", self.peek());
         let pattern = self.case_branch_pat()?;
         let bound = matches!(&pattern, Pat::Binder { .. });
         let alts = if let Some(Token::Pipe) = self.peek() {
@@ -207,7 +207,6 @@ impl<'t> Parser<'t> {
 
     // TODO: Optimize `Binder` variant
     fn case_pat_at(&mut self, binder: Token) -> Result<Pat, SyntaxError> {
-        use Pat::*;
         use Token::*;
         let loc = &self.loc();
 
@@ -227,19 +226,22 @@ impl<'t> Parser<'t> {
         match self.peek() {
             Some(Underscore) => self
                 .eat(&Underscore)
-                .and_then(|_| Ok(Wild)),
+                .and_then(|_| Ok(Pat::Wild)),
 
             Some(ParenL) => self.eat(&ParenL)
                 .and_then(|this| match this.peek() {
                     Some(Pipe) => {
                         this.many_while(
                             |tok| matches!(tok, Pipe),
-                            &mut |p| p
+                            |p| p
                                 .eat(&Pipe)
                                 .and_then(&mut Self::case_branch_pat))
                             .and_then(|(pattern, parser)|
                                 parser.eat(&ParenR)
-                                    .and_then(|_| Ok(Binder{binder, pattern})))
+                                    .and_then(|_| Ok(Pat::Binder{
+                                        binder, 
+                                        pattern: Box::new(Pat::Union(pattern))
+                                    })))
                     }
 
                     Some(t@Ident(_)) => Err(no_local_vars(loc, t, &binder)),
@@ -256,23 +258,23 @@ impl<'t> Parser<'t> {
                                     Comma, 
                                     ParenR, 
                                     &mut Self::case_branch_pat)?;
-                                items.insert(0, Ctor(ctor, args));
-                                Ok(Binder{ 
+                                items.insert(0, Pat::Ctor(ctor, args));
+                                Ok(Pat::Binder{ 
                                     binder, 
-                                    pattern: vec![Tuple(items)]
+                                    pattern: Box::new(Pat::Tuple(items))
                                 })
                             }
                             Some(Pipe) => {
                                 let mut items = this.many_sep_by(Pipe, &mut Self::case_branch_pat)?;
-                                items.insert(0, Ctor(ctor, args));
+                                items.insert(0, Pat::Ctor(ctor, args));
                                 this.eat(&ParenR)?;
-                                Ok(Binder { binder, pattern: items })
+                                Ok(Pat::Binder { binder, pattern: Box::new(Pat::Union(items)) })
                             }
                             Some(ParenR) => {
                                 this.eat(&ParenR)?;
-                                Ok(Binder {
+                                Ok(Pat::Binder {
                                         binder, 
-                                        pattern: vec![Ctor(ctor, args)]
+                                        pattern: Box::new(Pat::Ctor(ctor, args))
                                 })
                             }
                             // since the previous rule only stopped at the above three tokens, it follows any other matches are unreachable
@@ -285,7 +287,7 @@ impl<'t> Parser<'t> {
                             .and_then(|alts| 
                                 this.eat(&ParenR)
                                     .and_then(|_| 
-                                        Ok(Binder{ binder, pattern: alts })))
+                                        Ok(Pat::Binder{ binder, pattern: Box::new(Pat::Union(alts)) })))
                     }
 
                     Some(Token::Underscore) => this
@@ -306,10 +308,13 @@ impl<'t> Parser<'t> {
             Some(Pipe) => {
                 self.many_while(
                     |tok| matches!(tok, Pipe), 
-                    &mut |p| p
+                    |p| p
                             .eat(&Pipe)
                             .and_then(&mut Self::case_branch_pat))
-                    .and_then(|(alts, _)| Ok(Binder{binder, pattern: alts}))
+                    .and_then(|(alts, _)| Ok(Pat::Binder{
+                        binder, 
+                        pattern: Box::new(Pat::Union(alts))
+                    }))
             }
 
             Some(t@Ident(_)) => Err(no_local_vars(loc, t, &binder)),
@@ -369,28 +374,17 @@ impl<'t> Parser<'t> {
     }
 
     fn conditional_expr(&mut self) -> Result<Expr, SyntaxError> {
-        let [_if, _then, _else] = [
-            Token::Kw(Keyword::If),
-            Token::Kw(Keyword::Then),
-            Token::Kw(Keyword::Else),
-        ];
+        self.eat(&Token::Kw(Keyword::If))?;
+        let cond = self.expression()?;
+        self.eat(&Token::Kw(Keyword::Then))?;
+        let then = self.expression()?;
+        self.eat(&Token::Kw(Keyword::Else))?;
+        let other = self.expression()?;
 
-        self.eat(&_if).and_then(|p| {
-            p.expression().and_then(|cond| {
-                p.eat(&_then).and_then(|p| {
-                    p.expression().and_then(|then| {
-                        p.eat(&_else).and_then(|p| {
-                            p.expression().and_then(|other| {
-                                Ok(Expr::Cond {
-                                    cond: Box::new(cond),
-                                    then: Box::new(then),
-                                    other: Box::new(other),
-                                })
-                            })
-                        })
-                    })
-                })
-            })
+        Ok(Expr::Cond {
+            cond: Box::new(cond),
+            then: Box::new(then),
+            other: Box::new(other),
         })
     }
 
@@ -467,6 +461,7 @@ impl<'t> Parser<'t> {
                 let oploc = self.loc();
                 let op = self.take_next().as_operator().unwrap();
                 if self.match_curr(&Token::ParenR) {
+                    self.take_next();
                     Ok(Expr::Ident(Var::Infix(op)))
                 } else {
                     if self.fixities.get(&op).is_some() {
@@ -526,7 +521,7 @@ impl<'t> Parser<'t> {
     }
 
     fn record_app(&mut self, proto: Token) -> Result<Expr, SyntaxError> {
-        let fields = self.delimited(Token::CurlyL, Token::Comma, Token::CurlyR, &mut |p| {
+        let fields = self.delimited(Token::CurlyL, Token::Comma, Token::CurlyR, |p| {
             let left = p.take_next();
             match p.peek() {
                 Some(Token::Comma) => Ok((left, None)),
@@ -613,6 +608,36 @@ impl<'t> Parser<'t> {
         })
     }
 
+    /// Named application declarations are syntactic sugar for
+    /// case expressions in a (function) declaration.
+    /// 
+    /// Declarations must be grouped together such that the first 
+    /// declaration defines the base case, and subsequent declarations
+    /// form unique case branches which are matched against in order. 
+    /// The last declaration marks the end of the match alternatives.
+    /// 
+    /// ```xg
+    /// mult x 0 = 0
+    /// mult 0 x = 0
+    /// mult x y = x * y
+    /// ```
+    /// 
+    /// Is equivalent to
+    /// ```xg
+    /// fn |mult| \x y -> case (x, y) of 
+    ///     (_, 0) -> 0
+    ///     (0, _) -> 0
+    ///     (x, y) -> x * y
+    /// ```
+    fn named_pats(&mut self,) {}
+
+    fn let_expr(&mut self) -> Result<Expr, SyntaxError> {
+        todo!()
+        // let named = self.peek()
+        //     .and_then(|t| matches!(t, Token::Ident(..)))
+        //     .unwrap_or_else(|| false);
+    }
+
     fn brackets(&mut self) -> Result<Expr, SyntaxError> {
         todo!()
     }
@@ -632,7 +657,7 @@ impl<'t> Parser<'t> {
             Some(Token::ParenL) => self.parentheses(),
             Some(Token::BrackL) => self.brackets(),
             // Some(Token::CurlyL) => todo!(),
-            Some(Token::Kw(Let)) => todo!(),
+            Some(Token::Kw(Let)) => self.let_expr(),
             Some(Token::Kw(Case)) => self.case_expr(),
             Some(Token::Kw(If)) => self.conditional_expr(),
             Some(Token::Bang | Token::Operator(Operator::Reserved(BinOp::Minus))) => self.unary(),
@@ -679,77 +704,140 @@ impl<'t> Parser<'t> {
         }
     }
 
-    // fn terminal_error(&mut self) {}
+
+    /// Parse the body of a record pattern (i.e., everything between the curly 
+    /// braces) according to the given closure that returns a `Pat`, where that 
+    /// closure's strictness varies based on constraints and parsing context 
+    /// (namely, lambda vs let vs case).
+    fn record_field_pats<F>(&mut self, mut f: F) -> Result<Vec<(Token, Option<Pat>)>, SyntaxError> 
+    where F: FnMut(&mut Self) -> Result<Pat, SyntaxError> {
+        use Token::*; 
+        self.delimited(CurlyL, Comma, CurlyR, 
+            |p| {
+                let loc = p.loc();
+                match p.peek() {
+                    Some(Dot2) => {
+                        return Ok((Dot2, Some(Pat::Rest)));
+                    }
+                    Some(Ident(_) | Sym(_)) => {
+                        let field = p.take_next();
+                        match p.peek() {
+                            Some(Comma | CurlyR) => { Ok((field, None))}
+                            _ => {
+                                let rhs = f(p)?;
+                                Ok((field, Some(rhs)))
+                            }
+                        }
+                    }
+                    Some(t) => Err(SyntaxError(format!(
+                        "Invalid record accessor`{}` found at {} while parsing record constructor parameter accessors!", t, loc))),
+
+                    None => Err(Self::unexpected_eof_while("Parsing record field patterns", loc))
+                }
+            })
+    }
+
+    /// Parses a lambda argument pattern beginning with `(`.
+    fn grouped_lambda_arg(&mut self) -> Result<Pat, SyntaxError> {
+        use Token::*; 
+        self.eat(&ParenL)?;
+        match self.peek() {
+            Some(ParenR) => {
+               self.take_next();
+                return Ok(Pat::Tuple(Vec::new())); 
+            }
+            Some(Sym(..) | Ident(..)) => {
+                let sym = self.take_next();
+                match self.peek() {
+                    Some(ParenR) => {
+                        self.take_next();
+                        Ok(Pat::Ctor(sym, Vec::new()))
+                    }
+
+                    Some(Comma) => {
+                        let mut rest = self.delimited(
+                            Comma, 
+                            Comma, 
+                            ParenR, 
+                            Self::lambda_arg)?;
+                        rest.insert(0, Pat::Ctor(sym, Vec::new()));
+                        Ok(Pat::Tuple(rest))
+
+                    }
+
+                    Some(CurlyL) => {
+                        Ok(Pat::Record { ctor: sym, fields: self.record_field_pats(Self::lambda_arg)? })
+                    }
+
+                    _ => {
+                        let (args, _) = self
+                            .many_while(|t | !matches!(t, ParenR), 
+                            Self::lambda_arg)?;
+                        self.eat(&ParenR)?;
+                        Ok(Pat::Ctor(sym, args))
+                    }
+                }
+            }
+            _ => {
+                let first = self.lambda_arg()?;
+                let loc = self.loc(); 
+                match self.peek() {
+                    Some(Comma) => {
+                        let mut rest = self
+                            .delimited(Comma, Comma, ParenR, Self::lambda_arg)?;
+                        rest.insert(0, first);
+                        return Ok(Pat::Tuple(rest));
+                    }
+
+                    Some(ParenR) => {self.take_next(); Ok(first)}
+
+                    t => Err(SyntaxError(format!(
+                        "Invalid construuctor `{}` found at \
+                        {} while parsing lambda parameters",
+                        t.unwrap_or_else(|| &Eof), loc
+                    )))
+                }
+            }
+        }
+    }
 
     /// Parses patterns used as lambda argument(s)
     fn lambda_arg(&mut self) -> Result<Pat, SyntaxError> {
-        use Pat::*;
         use Token::*;
         let pos = self.loc();
         match self.peek() {
-            Some(Ident(_)) => Ok(Var(self.take_next())),
-            Some(Underscore) => self.eat(&Underscore).and_then(|_| Ok(Wild)),
+            Some(Ident(_)) => Ok(Pat::Var(self.take_next())),
 
-            Some(ParenL) => self.eat(&ParenL).and_then(|parser| match parser.peek() {
-                Some(Sym(..)) => {
-                    let first = parser.take_next();
-                    parser
-                        .many_while(|tok| !matches!(tok, ParenR), &mut Self::lambda_arg)
-                        .and_then(|(args, parser)| {
-                            parser.eat(&ParenR).and_then(|_| Ok(Ctor(first, args)))
-                        })
-                }
-                _ => parser.lambda_arg().and_then(|first| {
-                    let loc = parser.loc();
-                    match parser.peek() {
-                        Some(Comma) => {
-                            let mut pats =
-                                parser.delimited(Comma, Comma, ParenR, &mut Self::lambda_arg)?;
-                            pats.insert(0, first);
-                            Ok(Tuple(pats))
-                        }
-                        Some(ParenR) => parser.eat(&ParenR).and_then(|_| Ok(first)),
-                        None => Err(Self::unexpected_eof_while(
-                            "parsing parenthesis \
-                                            in case expression \
-                                            branch pattern",
-                            loc,
-                        )),
-                        Some(t) => Err(SyntaxError(format!(
-                            "Invalid pattern token `{}` while parsing \
-                                    parentheses in case expression branch \
-                                    pattern at {}",
-                            t, loc
-                        ))),
-                    }
-                }),
-            }),
-
-            Some(BrackL) => self
-                .delimited(BrackL, Comma, BrackR, &mut Self::lambda_arg)
-                .and_then(|pats| Ok(List(pats))),
-
-            // A constructor pattern begins with a symbol and extends as far to the right as possible
-            Some(Sym(..)) => {
-                let first = self.take_next();
-                self.many_while(|tok| !matches!(tok, ParenR), &mut Self::lambda_arg)
-                    .and_then(|(args, parser)| {
-                        parser.eat(&ParenR).and_then(|_| Ok(Ctor(first, args)))
-                    })
+            Some(BrackL) => {
+                let elements = self
+                    .delimited(BrackL, Comma, BrackR, 
+                        Self::lambda_arg)?;
+                Ok(Pat::List(elements))
             }
 
-            // remove this from pat, should only be allowed in let and case pats
-            Some(t) if Literal::is_token_literal(t) => Err(SyntaxError(format!(
-                "Literals are not allowed as lambda args! \
-                    Found literal token {} while parsing \
-                    lambda arguments at {}",
-                t, pos
-            ))),
+            Some(Sym(..)) => {
+                let ctor = self.take_next();
+                if matches!(self.peek(), Some(&CurlyL)) {
+                    Ok(Pat::Record { 
+                        ctor, 
+                        fields: self.record_field_pats(Self::lambda_arg)?
+                    })
+                } else {
+                    Ok(Pat::Ctor(ctor, Vec::new()))
+                }
+            }
+
+            Some(Underscore) => self.eat(&Underscore)
+                .and_then(|_| Ok(Pat::Wild)),
+
+            Some(ParenL) => {
+                self.grouped_lambda_arg()
+            }
 
             Some(Token::Error { data, msg, pos }) => Err(SyntaxError(format!(
                 "Invalid token while parsing lambda arguments. \
-                        Lexer provided the following error for `{}` \
-                        at {}:\n\t{}",
+                Lexer provided the following error for `{}` \
+                at {}:\n\t{}",
                 data, pos, msg
             ))),
             Some(t) => Err(SyntaxError(format!(
@@ -765,27 +853,23 @@ impl<'t> Parser<'t> {
     }
 
     fn lambda(&mut self) -> Result<Expr, SyntaxError> {
-        use Expr::Lam as Lambda;
-        use Token::{ArrowR as To, Lambda as Lam};
+        use Token::{ArrowR, Lambda};
+        use Expr::Lam;
 
-        self.eat(&Lam)
-            .and_then(|parser| parser.many_while(|tok| !matches!(tok, To), &mut Self::lambda_arg))
-            .and_then(|(pats, parser)| {
-                parser
-                    .eat(&To)
-                    .and_then(|parser| parser.expression())
-                    .and_then(|body| {
-                        let mut arity = Arity::from(-1 as i32);
-                        Ok(pats.into_iter().rev().fold(body, |bd, arg| Lambda {
-                            arg,
-                            arity: {
-                                arity += Arity::from(1);
-                                arity
-                            },
-                            body: Box::new(bd),
-                        }))
-                    })
-            })
+        self.eat(&Lambda)?;
+        let (pats, _) = self.many_while(
+            |t| !matches!(t, ArrowR), 
+            Self::lambda_arg)?;
+
+        self.eat(&ArrowR)?;
+        let body = self.expression()?;
+        Ok(pats
+            .into_iter()
+            .rev()
+            .fold(body, 
+                |expr, arg| Lam {
+                arg, body: Box::new(expr)
+            }))
     }
 
     fn unexpected_eof_while(action: &str, loc: Location) -> SyntaxError {
@@ -794,9 +878,9 @@ impl<'t> Parser<'t> {
 }
 
 mod tests {
-    #![allow(unused_imports)]
+    #![allow(unused)]
     extern crate test;
-    use crate::compiler::parser::syntax::Var;
+    use crate::compiler::syntax::expr::Var;
 
     use super::*;
     use test::Bencher;
@@ -810,6 +894,12 @@ mod tests {
             println!("Parse failure:\n{}", &err);
             err
         })
+    }
+
+    fn parser_with_expression(s: &str) -> Result<(Expr, Parser), SyntaxError> {
+        let mut parser = Parser::new(s);
+        parser.expression()
+            .and_then(|expr| Ok((expr, parser)))
     }
 
     #[bench]
@@ -853,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn long_binary_expression_doesnt_overflow_stack() {
+    fn long_binary_expression_overflows_stack() {
         let lim = 2780; // 1000;
         let mut source = (0..lim).map(|i| format!("{} + ", i)).collect::<String>();
         source.push_str(&*(lim.to_string()));
@@ -871,21 +961,20 @@ mod tests {
         let _ = echo_expr("\\a b -> a + b");
         let _ = echo_expr("\\a -> \\b -> a + b");
         let _ = echo_expr("\\(:A' a) -> a");
+        let _ = echo_expr("\\:A { a } -> a");
+        let _ = echo_expr("(+) 1 2");
     }
 
-    #[test]
-    fn case_expr() {
-        let mut parser = Parser::new(
-            "case x + y of {
-            1 | 2 | 3 -> 4;
-            _ -> 5
-        }",
-        );
-        let p2 = parser.lexer.clone();
-        for tok in p2 {
-            println!("{}", tok);
-        }
-        let expr = parser.expression();
-        println!("{:#?}", expr.unwrap());
+    #[bench]
+    fn bench_case_expr_col_aligned(b: &mut Bencher) {
+        let source = "case x + y of \n\
+                \t1 | 2 | 3 -> 4 \n\
+                \t_ -> 5 \n\
+                ";
+        let _ = echo_expr(source);
+        println!("{}", &source);
+        b.iter(|| {
+            test::black_box(Parser::new(source).expression())
+        });
     }
 }

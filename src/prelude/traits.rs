@@ -6,13 +6,13 @@
 /// whose `peek` method would not need to be implemented in order
 /// to implement `Peek`.
 pub trait Peek {
-    type Item: std::cmp::PartialEq + Default;
+    type Peeked: std::cmp::PartialEq + Default;
 
-    fn peek(&mut self) -> Option<&Self::Item>;
+    fn peek(&mut self) -> Option<&Self::Peeked>;
 
     fn is_done(&mut self) -> bool;
 
-    fn match_curr(&mut self, item: &Self::Item) -> bool {
+    fn match_curr(&mut self, item: &Self::Peeked) -> bool {
         if let Some(t) = self.peek() {
             item == t
         } else {
@@ -65,4 +65,10 @@ pub trait Newtype {
     {
         f(self.get_mut());
     }
+}
+
+/// Utility marker trait. Associated type `Id` should implement `Eq`.
+/// TODO: Should the `Eq` bound be changed for `std::cmp::PartialEq`?
+pub trait Identity {
+    type Id: Eq;
 }

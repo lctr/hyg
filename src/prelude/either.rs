@@ -71,7 +71,9 @@ impl<L, R> Either<L, R> {
         }
     }
 
-    pub fn into_iter(self) -> Either<L::IntoIter, R::IntoIter>
+    pub fn into_iter(
+        self,
+    ) -> Either<L::IntoIter, R::IntoIter>
     where
         L: IntoIterator,
         R: IntoIterator<Item = L::Item>,

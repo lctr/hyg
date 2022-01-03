@@ -1,18 +1,58 @@
+use crate::compiler::lexer::TokenError;
+
 use super::{
-    literal::Literal, pattern::Pat, Operator, Token,
+    literal::Literal, pattern::Pat, Newtype, Operator,
+    Token,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Name<T>(T);
+
+impl<T> From<T> for Name<T> {
+    fn from(t: T) -> Self {
+        Self(t)
+    }
+}
+
+impl<T> Newtype for Name<T> {
+    type Inner = T;
+
+    fn get_ref(&self) -> &Self::Inner {
+        &self.0
+    }
+
+    fn get_mut(&mut self) -> &mut Self::Inner {
+        &mut self.0
+    }
+
+    fn take(self) -> Self::Inner {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Var {
     Ident(String),
     Infix(Operator),
-    Name(u32),
+    Cons(String),
+}
+
+impl std::convert::TryFrom<Token> for Var {
+    type Error = TokenError;
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Ident(s) => Ok(Var::Ident(s)),
+            Token::Sym(s) => Ok(Var::Cons(s)),
+            Token::Operator(o) => Ok(Var::Infix(o)),
+            t => Err(TokenError::Incompatible(format!("Failed Token -> Var conversion! Expected either `Ident`, `Sym`, or `Operator` variant, but found {:?}", t)))
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Binding {
-    pat: Pat,
-    expr: Expr,
+    pub pat: Pat,
+    pub expr: Expr,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

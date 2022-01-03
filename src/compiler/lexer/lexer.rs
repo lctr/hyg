@@ -26,7 +26,7 @@ pub struct Lexer<'t> {
     source: Source<'t>,
     current: Option<Token>,
     queue: Vec<Token>,
-    spans: Vec<Location>,
+    pub spans: Vec<Location>,
 }
 
 impl<'t> Positioned for Lexer<'t> {
@@ -52,7 +52,6 @@ impl<'t> Lexer<'t> {
     }
 
     fn next_char(&mut self) -> Option<char> {
-        self.spans.push(self.loc());
         self.source.next()
     }
 
@@ -62,10 +61,10 @@ impl<'t> Lexer<'t> {
     {
         let mut buf = String::new();
         while !self.is_done() {
-            if let Some(c) = self.source.peek() {
+            if let Some(c) = self.peek_char() {
                 if pred(*c) {
                     buf.push(*c);
-                    self.source.next();
+                    self.next_char();
                     continue;
                 }
             }
@@ -80,13 +79,15 @@ impl<'t> Lexer<'t> {
         F: FnMut(char) -> bool,
     {
         let mut buf = String::new();
-        while let Some(c) = self.peek_char() {
-            if pred(*c) {
-                buf.push(*c);
-                self.next_char();
-                continue;
+        while !self.is_done() {
+            if let Some(c) = self.peek_char() {
+                if pred(*c) {
+                    buf.push(*c);
+                    self.next_char();
+                    continue;
+                }
+                break;
             }
-            break;
         }
         buf
     }
@@ -203,7 +204,7 @@ impl<'t> Lexer<'t> {
                                 Token::Char(get_escaped(c))
                             } else {
                                 self.next_char();
-                                Token::Error {
+                                Token::Invalid {
                                     data: format!("{}", c),
                                     msg: format!(
                                         "Unclosed character! Expected `'` after escape {}",
@@ -215,7 +216,7 @@ impl<'t> Lexer<'t> {
                         }
                         invalid @ _ => {
                             self.next_char();
-                            Token::Error {
+                            Token::Invalid {
                                 data: format!("{:?}", invalid),
                                 msg: format!("Invalid character escape!"),
                                 pos,
@@ -227,7 +228,7 @@ impl<'t> Lexer<'t> {
                     if let Some('\'') = self.next_char() {
                         Token::Char(c)
                     } else {
-                        Token::Error {
+                        Token::Invalid {
                             data: format!("{}", c),
                             msg: format!("Unclosed character! Expected `'` after char {}", c),
                             pos,
@@ -235,7 +236,7 @@ impl<'t> Lexer<'t> {
                     }
                 }
             }
-            None => Token::Error {
+            None => Token::Invalid {
                 data: "'".into(),
                 msg: "Unexpected end of input after first `'`!".into(),
                 pos,
@@ -311,7 +312,7 @@ impl<'t> Lexer<'t> {
                 }
             }
         } else {
-            Token::Error {
+            Token::Invalid {
                 data: COMMENT_INNER.into(),
                 msg: format!(
                     "Unexpected end of input after `{}`!",
@@ -386,12 +387,12 @@ impl<'t> Lexer<'t> {
                     data.push(exp);
                     self.next_char();
                 }
-                Some(_) => {
+                Some(c) if c.is_digit(10) => {
                     let pos = self.loc();
                     return self
                         .next_char()
                         .and_then(|val| {
-                            Some(Token::Error {
+                            Some(Token::Invalid {
                                 data,
                                 msg: format!("Character {} after initial `0` not supported!", val),
                                 pos,
@@ -399,8 +400,10 @@ impl<'t> Lexer<'t> {
                         })
                         .unwrap();
                 }
-                // unreachble since this only runs on the first digit. Since this method was triggered by a digit char, we can be secure in this branch not being possible.
-                None => unreachable!(),
+                _ => {
+                    data.push(ZERO);
+                    return Token::Num { data, flag }
+                },
             }
         };
 
@@ -410,7 +413,7 @@ impl<'t> Lexer<'t> {
             if first {
                 first = false;
                 if !c.is_digit(10) {
-                    return Token::Error{ 
+                    return Token::Invalid{ 
                         data: c.into(), 
                         msg: format!("Invalid sequence after partial lexer result `{}`! Expected a digit, but found `{}`", data, c), 
                         pos: self.loc()};
@@ -427,7 +430,7 @@ impl<'t> Lexer<'t> {
                 'e' | 'E' => {
                     if flag == NumFlag::Sci {
                         self.next_char();
-                        return Token::Error { 
+                        return Token::Invalid { 
                             msg: format!("Invalid exponential! \
                             There may only be one instance of the infix `{}` in the representation of a floating point number. \n\
                             Input lexed: {}", c, &data), 
@@ -446,14 +449,14 @@ impl<'t> Lexer<'t> {
                             sciop += 1;
                             data.push(c);
                         } else {
-                            return Token::Error {
+                            return Token::Invalid {
                                 data: c.into(),
                                 msg: format!("The characters `{}` may only come after an exponential infix `e` or `E` for floating point numbers. Lexed: `{}`", c, data),
                                 pos: self.loc()
                             };
                         }
                     } else if data.ends_with('.') {
-                        return Token::Error {
+                        return Token::Invalid {
                             msg: format!(
                                 "Invalid exponential infix! Unable to lex `{}` + `{}`",
                                 &data, c
@@ -494,7 +497,7 @@ impl<'t> Lexer<'t> {
                             }
                         }
                         NumFlag::Dec | NumFlag::Sci => {
-                            return Token::Error {
+                            return Token::Invalid {
                                 msg: format!(
                                     "Invalid character `.`! The number \
                                     being lexed, `{0}`, has flag `{1:?}` and does not accept further `.`. Additionally, the use of the Range operator `..` is only supported for integers (flag `Int`).", &data, flag),
@@ -534,7 +537,7 @@ impl<'t> Lexer<'t> {
                         self.queue.push(Token::Dot2);
                         break;
                     } else {
-                        return Token::Error {
+                        return Token::Invalid {
                             msg: format!(
                                 "Found `{}` while lexing an \
                                 integer {} with flag {:?}",
@@ -596,7 +599,7 @@ impl<'t> Lexer<'t> {
                             .unwrap_or('\0');
                         match self.ident(ch) {
                                 Token::Ident(s) => Token::Ident(format!("{}{}", c, s)),
-                                _ => Token::Error {
+                                _ => Token::Invalid {
                                     data: ch.into(),
                                     msg: format!(
                                         "Invalid sequence after prefix `{}`! Expected `'` or `\"`, but found {}",
@@ -658,7 +661,7 @@ impl<'t> Lexer<'t> {
     fn unknown(&mut self, c: char) -> Token {
         let pos = self.loc();
         self.next_char();
-        Token::Error {
+        Token::Invalid {
             data: c.into(),
             msg: "Unknown character!".into(),
             pos,
@@ -673,7 +676,10 @@ impl<'t> Iterator for Lexer<'t> {
             Some(t) => Some(t),
             None => match self.token() {
                 Token::Eof => None,
-                tok => Some(tok),
+                tok => {
+                    // self.spans.push(self.loc());
+                    Some(tok)
+                },
             },
         }
     }
@@ -882,5 +888,20 @@ mod test {
         );
         assert!(lexer.is_done());
         assert_eq!(lexer.next(), None)
+    }
+
+    #[test]
+    fn test_spanned() {
+        let src = "a     thing here is \nsuch <> *a thing*";
+        let mut lexer = Lexer::new(src);
+        let mut ct = 0;
+        while !lexer.is_done() {
+            let start = lexer.loc();
+            let tok = lexer.next();
+            let end = lexer.loc();
+            println!("[{}]:\tstart: {}, token: {:?}, end: {}", &ct, start, tok, end);
+            ct += 1; 
+        }
+        println!("{:#?}", lexer.spans)
     }
 }

@@ -17,6 +17,9 @@ strenum! { Keyword is_kw ::
     Fn      "fn"
     Import  "import"
     Export  "export"
+    InfixL  "infixl"
+    InfixR  "infixr"
+    Derive  "deriving"
 
 }
 
@@ -57,9 +60,12 @@ impl Assoc {
 
 strenum! { each BinOp is_binary ::
     // TODO!
+    // forward composition
+    // a -> (a -> b) -> b
+    PipeR     "|>"   @ 1 L
+    // backward composition
     // (a -> b) -> a -> b
-    // (b -> c) -> (a -> b) -> a -> c
-    // ComposeL  "<|"   @ 9 L
+    PipeL     "<|"   @ 0 R
     Or        "||"   @ 2 L
     And       "&&"   @ 3 L
     NotEq     "!="
@@ -77,6 +83,10 @@ strenum! { each BinOp is_binary ::
     Mod       "mod"  @ 8 L
     Pow       "**"
     Raise     "^"    @ 9 R
+    //
+    CompL     "</"   @ 10 R
+    CompR     "\\>"  @ 10 L
+    //
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -172,7 +182,7 @@ pub enum Token {
     Pipe,
     ArrowR,
     ArrowL,
-    Error {
+    Invalid {
         data: String,
         msg: String,
         pos: Location,
@@ -219,6 +229,106 @@ impl Token {
         } else {
             None
         }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Token::Ident(..)
+                | Token::Sym(..)
+                | Token::Num { .. }
+                | Token::Char(..)
+                | Token::Str(..)
+                | Token::Bytes(..)
+                | Token::Operator(..)
+                | Token::Kw(..)
+                | Token::Lambda
+                | Token::ParenL
+                | Token::BrackL
+        )
+    }
+
+    pub fn as_u8(&self) -> Result<u8, TokenError> {
+        if let Token::Num {
+            data,
+            flag: NumFlag::Int,
+        } = self
+        {
+            u8::from_str_radix(data.as_str(), 10)
+                .map_err(|err| TokenError::ParseInt(err))
+        } else {
+            Err(TokenError::Incompatible(format!("Unable to read `{}` as u8! Token must be a `Num` variant with an `Int` flag.", self)))
+        }
+    }
+
+    pub fn as_assoc_spec(
+        &self,
+    ) -> Result<Assoc, TokenError> {
+        match self {
+            Token::Kw(Keyword::InfixL) => Ok(Assoc::Left),
+            Token::Kw(Keyword::InfixR) => Ok(Assoc::Right),
+            t => Err(TokenError::Incompatible(format!("The token `{}` cannot be coerced into an Assoc variant!", t)))
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for Assoc {
+    type Error = TokenError;
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        value.as_assoc_spec()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum TokenError {
+    ParseInt(std::num::ParseIntError),
+    ParseFloat(std::num::ParseFloatError),
+    Incompatible(String),
+}
+
+impl std::fmt::Display for TokenError {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        fn g(
+            f: &mut std::fmt::Formatter<'_>,
+            e: impl std::fmt::Display,
+        ) -> std::fmt::Result {
+            write!(f, "Token error: {}", e)
+        }
+
+        match self {
+            TokenError::ParseInt(e) => g(f, e),
+            TokenError::ParseFloat(e) => g(f, e),
+            TokenError::Incompatible(e) => g(f, e),
+        }
+    }
+}
+
+impl From<std::num::ParseIntError> for TokenError {
+    fn from(err: std::num::ParseIntError) -> Self {
+        Self::ParseInt(err)
+    }
+}
+
+impl From<std::num::ParseFloatError> for TokenError {
+    fn from(err: std::num::ParseFloatError) -> Self {
+        Self::ParseFloat(err)
+    }
+}
+
+impl From<&str> for TokenError {
+    fn from(err: &str) -> Self {
+        Self::Incompatible(err.into())
+    }
+}
+
+impl std::convert::TryFrom<Token> for u8 {
+    type Error = TokenError;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        value.as_u8()
     }
 }
 
@@ -292,7 +402,7 @@ impl std::fmt::Display for Token {
             Token::Pipe => write!(f, "|"),
             Token::ArrowR => write!(f, "->"),
             Token::ArrowL => write!(f, "<-"),
-            Token::Error {
+            Token::Invalid {
                 data: val,
                 msg,
                 pos,

@@ -6,7 +6,7 @@ pub use lexer::Lexer;
 pub use source::Peek;
 pub use token::{
     Assoc, BinOp, Comment, Keyword, NumFlag, Operator,
-    Token,
+    Token, TokenError,
 };
 
 // helpful re-imports

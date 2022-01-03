@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 use crate::prelude::traits::Identity;
 
 use super::{literal::Literal, Token};
@@ -114,6 +116,27 @@ impl<L, T> Morpheme<L, T> {
                     .map(|m| m.map_lit(|l| f(l)))
                     .collect::<Vec<_>>(),
             ),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Morpheme<Literal, Token>>
+    for Token
+{
+    type Error = &'static str;
+    fn try_from(
+        value: Morpheme<Literal, Token>,
+    ) -> Result<Self, Self::Error> {
+        match value {
+            Morpheme::Lit(Literal::Bytes(x)) => Ok(Token::Bytes(x)),
+            Morpheme::Lit(Literal::Char(c)) => Ok(Token::Char(c)),
+            Morpheme::Lit(Literal::Num { data, flag }) => Ok(Token::Num{data,flag}),
+            Morpheme::Lit(Literal::Str(s)) => Ok(Token::Str(s)),
+            Morpheme::Lit(Literal::Sym(s)) => Ok(Token::Sym(s)),
+            Morpheme::Var(t) => Ok(t),
+            Morpheme::Wild => Ok(Token::Underscore),
+            Morpheme::Rest => Ok(Token::Dot2),
+            _ => Err("Invalid Token extraction from Morpheme<Literal, Token>! Only single-token morphemes/patterns may be successfully converted into a Token.")
         }
     }
 }

@@ -1,4 +1,3 @@
-mod fixity;
 mod parser;
 mod scan;
 

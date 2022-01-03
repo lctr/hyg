@@ -1,5 +1,7 @@
+pub mod decl;
 pub mod error;
 pub mod expr;
+pub mod fixity;
 pub mod literal;
 pub mod pattern;
 

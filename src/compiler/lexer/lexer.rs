@@ -330,7 +330,11 @@ impl<'t> Lexer<'t> {
         } else if let Some(kw) = Keyword::from_str(&*buf) {
             Token::Kw(kw)
         } else {
-            Token::Ident(buf)
+            (if _start.is_uppercase() {
+                Token::Sym
+            } else {
+                Token::Ident
+            })(buf)
         }
     }
 

@@ -35,17 +35,12 @@ pub trait Newtype {
     type Inner;
 
     /// Standard accessor methods for the inner type.
-    fn get(&self) -> Self::Inner;
     fn get_ref(&self) -> &Self::Inner;
+
     fn get_mut(&mut self) -> &mut Self::Inner;
 
-    /// Applies a closure to the owned inner value.
-    fn apply<F, X>(&self, f: F) -> X
-    where
-        F: FnOnce(Self::Inner) -> X,
-    {
-        f(self.get())
-    }
+    /// Consumes and returns the inner type.
+    fn take(self) -> Self::Inner;
 
     /// Applies a closure to a reference of the inner value.
     fn apply_ref<F, X>(&self, f: F) -> X

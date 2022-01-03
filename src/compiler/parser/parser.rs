@@ -1,12 +1,14 @@
-use crate::{compiler::lexer::{
-    BinOp, Keyword, Lexer, Operator, Peek, Token,
-}, prelude::span::{Location, Positioned}};
+use std::convert::{TryInto, TryFrom};
 
-use crate::compiler::syntax::{expr::{Expr, Match,  Section, Var}, literal::{Literal, LitErr}, pattern::Pat};
+use crate::{compiler::{lexer::{
+    BinOp, Keyword, Lexer, Operator, Peek, Token,
+}, syntax::{expr::Binding, decl::{Decl, TyPat, DataVariant}}}, prelude::span::{Location, Positioned}};
+
+use crate::compiler::syntax::{expr::{Expr, Match,  Section, Var}, literal::{Literal, LitErr}, pattern::Pat, fixity::{Fixity, FixityTable},};
 
 use super::{
-    fixity::{Fixity, FixityTable}, 
-    scan::{Combinator, Consume},
+     
+    scan::{Combinator, Consume, Layout},
     Comment,
 };
 
@@ -24,6 +26,9 @@ impl std::fmt::Display for SyntaxError {
         write!(f, "{}", &(self.0))
     }
 }
+
+
+
 pub struct Parser<'t> {
     lexer: Lexer<'t>,
     fixities: FixityTable,
@@ -42,7 +47,7 @@ impl<'t> Peek for Parser<'t> {
         self.lexer.peek()
     }
     fn is_done(&mut self) -> bool {
-        self.lexer.is_done()
+        self.lexer.is_done() || matches!(self.peek(), Some(Token::Eof))
     }
 }
 
@@ -94,6 +99,8 @@ impl<'t> Consume<'t> for Parser<'t> {
 
 impl<'t> Combinator<'t> for Parser<'t> {}
 
+impl<'t> Layout<'t> for Parser<'t> {}
+
 impl<'t> From<Lexer<'t>> for Parser<'t> {
     fn from(lexer: Lexer<'t>) -> Self {
         Self {
@@ -114,7 +121,82 @@ impl<'t> Parser<'t> {
     }
 
     pub fn expression(&mut self) -> Result<Expr, SyntaxError> {
+        // self.within_offside(Token::is_terminal, Self::infix_expr)
+        //     .and_then(|expr| Ok(expr.resolve(|x| x, 
+        //         |(func, args)| Expr::App { func: Box::new(func), args })))
+
+        let (start, expr) = self.subexpression()?;
+
+        println!("[{}] {:?}", &start, &expr);
+        if self.is_done() 
+            || self.peek()
+                   .and_then(|t| Some(!t.is_terminal()))
+                   .unwrap_or_else(|| false) 
+            || self.get_column() <= start.col 
+            || self.get_row() > start.row { 
+            Ok(expr) 
+        } else {
+            self.maybe_app(start, expr)
+        }
+    }
+    fn infix_expr(&mut self) -> Result<Expr, SyntaxError> {
         self.binary(0, &mut Self::terminal)
+    }
+
+    /// First saves the current location, and then parses an expressiob, 
+    /// returning both the location and the parsed results. 
+    pub fn subexpression(&mut self) -> Result<(Location, Expr), SyntaxError> {
+        let loc = self.loc();
+        let expr = self.binary(0, &mut Self::terminal)?;
+        Ok((loc, expr))
+    }
+
+    /// Given an expression, continues parsing any legal upper-right diagonally
+    /// inclusive expressions as arguments to an application expression.
+    /// 
+    /// Legal upper-right diagonal inclusivity for expressions is demonsteated
+    /// below.
+    /// 
+    /// ```rustignore
+    /// Let r - row, c - col
+    /// given an expression X with coordinates (r_x, c_x), its arguments
+    /// is the maximal set of expressions Y with coordinates (r_y, c_y) such
+    /// that if for all y in Y
+    ///     r_x == r_y              <- notice this is a single binary expr
+    ///     c_x < c_y               <- binary exprs are infix apps
+    ///     r_x < r_y && c_x < x_y
+    ///      
+    /// Suppose we have `f x y`. 
+    /// We see that the first subexpr is `f` which has coordinates
+    ///     (r_x, c_x) = (1, 0)
+    /// the second is `x`, with coordinates 
+    ///     (r_y1, c_y1) = (1, 2)
+    /// the third is `y`, with coordinates
+    ///     (r,_y2, c_y2) = (1, 4)
+    /// Since r_x == r_yi for all r_yi's, this expression trivially forms an 
+    /// application App { func: `f`, args: [`x`, `y`]}
+    /// 
+    /// Now consider an expression with nested expressions.
+    ///     `f h
+    ///         g (j k x)`
+    /// The coordinates of each expressions (1, 0), (1, 2), (2, 3), (2, 5)
+    /// 
+    /// ```
+    fn maybe_app(&mut self, start: Location, expr: Expr) -> Result<Expr, SyntaxError> {
+        let mut nodes = vec![];
+
+        let mut row = if self.get_row() == start.row 
+            || self.get_column() > start.col {
+            start.row 
+        } else { self.get_row() };
+
+        while self.peek().and_then(|t| Some(t.is_terminal())).unwrap_or_else(|| false) && !self.is_done() && self.get_row() == row {
+            nodes.push(self.binary(0, &mut Self::terminal)?);
+            if self.get_column() > start.col {
+                row = self.get_row()
+            }
+        }
+        Ok(Expr::App { func: Box::new(expr), args: nodes })
     }
 
     fn binary<F>(&mut self, min_prec: u8, f: &mut F) -> Result<Expr, SyntaxError>
@@ -133,6 +215,9 @@ impl<'t> Parser<'t> {
             if min_prec < prec || (min_prec == prec && assoc.is_right()) {
                 // since we know the token will contain an `Operator`, this is safe to unwrap
                 let op = self.take_next().as_operator().unwrap();
+                if self.is_done() {
+                    return Ok(Expr::Section(Section::Left { infix: op, left: Box::new(expr) }))
+                };
                 let right = self.binary(prec, f)?;
                 expr = Expr::Binary {
                     infix: op,
@@ -160,7 +245,7 @@ impl<'t> Parser<'t> {
     fn case_expr(&mut self) -> Result<Expr, SyntaxError> {
         let expr = Box::new(
             self.eat(&Token::Kw(Keyword::Case))
-                .and_then(Self::expression)?,
+                .and_then(Self::subexpression)?.1,
         );
         self.eat(&Token::Kw(Keyword::Of))?;
         let arms = match self.peek() {
@@ -168,9 +253,9 @@ impl<'t> Parser<'t> {
                 Token::CurlyL,
                 Token::Semi,
                 Token::CurlyR,
-                &mut Self::case_arms,
+                Self::case_arms,
             )?,
-            _ => self.many_col_aligned(&mut Self::case_arms)?,
+            _ => self.many_col_aligned(Self::case_arms)?,
         };
         Ok(Expr::Case { expr, arms })
     }
@@ -180,20 +265,20 @@ impl<'t> Parser<'t> {
         let bound = matches!(&pattern, Pat::Binder { .. });
         let alts = if let Some(Token::Pipe) = self.peek() {
             self.eat(&Token::Pipe)
-                .and_then(|p| p.many_sep_by(Token::Pipe, &mut Self::case_branch_pat))?
+                .and_then(|p| p.many_sep_by(Token::Pipe, Self::case_branch_pat))?
         } else {
             vec![]
         };
         let guard = if let Some(Token::Kw(Keyword::If)) = self.peek() {
             Some(
                 self.eat(&Token::Kw(Keyword::If))
-                    .and_then(|p| p.expression())?,
+                    .and_then(|p| p.subexpression())?.1,
             )
         } else {
             None
         };
         self.eat(&Token::ArrowR)?;
-        let body = self.expression()?;
+        let body = self.subexpression()?.1;
         Ok((
             Match {
                 pattern,
@@ -235,7 +320,7 @@ impl<'t> Parser<'t> {
                             |tok| matches!(tok, Pipe),
                             |p| p
                                 .eat(&Pipe)
-                                .and_then(&mut Self::case_branch_pat))
+                                .and_then(Self::case_branch_pat))
                             .and_then(|(pattern, parser)|
                                 parser.eat(&ParenR)
                                     .and_then(|_| Ok(Pat::Binder{
@@ -250,14 +335,14 @@ impl<'t> Parser<'t> {
                         let ctor = this.take_next();
                         let (args, _) = this.many_while(
                             |t| !matches!(t, Pipe | ParenR | Comma), 
-                            &mut Self::case_branch_pat)?;
+                            Self::case_branch_pat)?;
                         match this.peek() {
                             Some(Comma) => {
                                 let mut items = this.delimited(
                                     Comma, 
                                     Comma, 
                                     ParenR, 
-                                    &mut Self::case_branch_pat)?;
+                                    Self::case_branch_pat)?;
                                 items.insert(0, Pat::Ctor(ctor, args));
                                 Ok(Pat::Binder{ 
                                     binder, 
@@ -265,7 +350,7 @@ impl<'t> Parser<'t> {
                                 })
                             }
                             Some(Pipe) => {
-                                let mut items = this.many_sep_by(Pipe, &mut Self::case_branch_pat)?;
+                                let mut items = this.many_sep_by(Pipe, Self::case_branch_pat)?;
                                 items.insert(0, Pat::Ctor(ctor, args));
                                 this.eat(&ParenR)?;
                                 Ok(Pat::Binder { binder, pattern: Box::new(Pat::Union(items)) })
@@ -283,11 +368,14 @@ impl<'t> Parser<'t> {
                     }
 
                     Some(Bytes(_) | Char(_) | Str(_) | Num {..}) => {
-                        this.many_sep_by(Pipe, &mut Self::case_branch_pat)
+                        this.many_sep_by(Pipe, Self::case_branch_pat)
                             .and_then(|alts| 
                                 this.eat(&ParenR)
                                     .and_then(|_| 
-                                        Ok(Pat::Binder{ binder, pattern: Box::new(Pat::Union(alts)) })))
+                                        Ok(Pat::Binder{ 
+                                            binder, 
+                                            pattern: Box::new(Pat::Union(alts)) 
+                                        })))
                     }
 
                     Some(Token::Underscore) => this
@@ -310,7 +398,7 @@ impl<'t> Parser<'t> {
                     |tok| matches!(tok, Pipe), 
                     |p| p
                             .eat(&Pipe)
-                            .and_then(&mut Self::case_branch_pat))
+                            .and_then(Self::case_branch_pat))
                     .and_then(|(alts, _)| Ok(Pat::Binder{
                         binder, 
                         pattern: Box::new(Pat::Union(alts))
@@ -359,9 +447,61 @@ impl<'t> Parser<'t> {
                     Num { data, flag } => Literal::Num { data, flag },
                     _ => unreachable!(),
                 }))
-                
             }
-            Some(Error { data, msg, pos }) => Err(SyntaxError(format!(
+            Some(ParenL) => {
+                self.eat(&ParenL)?;
+                match self.peek() {
+                    Some(ParenR) => {
+                        self.eat(&ParenR)?;
+                        Ok(Pat::Tuple(vec![]))
+                    }
+                    Some(Ident(..) | Sym(..)) => {
+                        let ctor = self.take_next();
+                        match self.peek() {
+                            Some(ParenR) => {
+                                self.eat(&ParenR)?;
+                                Ok(Pat::Lit(ctor.try_into().unwrap()))
+                            }
+                            Some(Comma) => {
+                                let mut items = self.delimited(
+                                    Comma, Comma, ParenR, 
+                                    Self::case_branch_pat)?;
+                                items.insert(0, Pat::Lit(ctor.try_into().unwrap()));
+                                Ok(Pat::Tuple(items))
+                            }
+                            _ => {
+                                let (args, _) = self.many_while(|t| !matches!(t, ParenR),
+                                Self::case_branch_pat)?;
+                                Ok(Pat::Ctor(ctor, args))
+                            }
+                        }
+                    }
+                    _ => {
+                        let first = self.case_branch_pat()?;
+                        match self.peek() {
+                            Some(ParenR) => {
+                                self.eat(&ParenR)?;
+                                Ok(first)
+                            }
+                            Some(Comma) => {
+                                let mut items = self.delimited(
+                                    Comma, Comma, ParenR,
+                                    Self::case_branch_pat)?;
+                                items.insert(0, first);
+                                Ok(Pat::Tuple(items))
+                            }
+                            _ => {
+                                let (args, _) = self.many_while(
+                                    |t| !matches!(t, ParenR), 
+                                    Self::case_branch_pat)?;
+                                let ctor: Result<Token, SyntaxError> = first.try_into().map_err(|x: &'static str| SyntaxError(x.into()));
+                                Ok(Pat::Ctor(ctor?, args))
+                            }
+                        }
+                    }
+                }
+            }
+            Some(Invalid { data, msg, pos }) => Err(SyntaxError(format!(
                 "Invalid token while parsing case branches. \
                     Lexer provided the following error for `{}` at {}:\n\t{}",
                 data, pos, msg
@@ -375,11 +515,11 @@ impl<'t> Parser<'t> {
 
     fn conditional_expr(&mut self) -> Result<Expr, SyntaxError> {
         self.eat(&Token::Kw(Keyword::If))?;
-        let cond = self.expression()?;
+        let (_, cond) = self.subexpression()?;
         self.eat(&Token::Kw(Keyword::Then))?;
-        let then = self.expression()?;
+        let (_, then) = self.subexpression()?;
         self.eat(&Token::Kw(Keyword::Else))?;
-        let other = self.expression()?;
+        let (_, other) = self.subexpression()?;
 
         Ok(Expr::Cond {
             cond: Box::new(cond),
@@ -389,25 +529,22 @@ impl<'t> Parser<'t> {
     }
 
     /// Called when already on a literal token
-    fn literal(&mut self) -> Result<Expr, SyntaxError> {
+    fn literal(&mut self, token: Token) -> Result<Expr, SyntaxError> {
         let loc = self.loc();
-        match self.peek() {
-            Some(
-                Token::Sym(_)
-                | Token::Char(_)
-                | Token::Str(_)
-                | Token::Bytes(_)
-                | Token::Num { .. },
-            ) => Ok(Expr::Lit(Literal::from_token(self.take_next()).unwrap())),
+        match &token {
+            Token::Sym(_)
+            | Token::Char(_)
+            | Token::Str(_)
+            | Token::Bytes(_)
+            | Token::Num { .. }
+            => Ok(Expr::Lit(Literal::from_token(token).unwrap())),
 
             // in theory, these cases shouldn't come up as this method is only called when peeking a `Token::Literal`.
-            Some(t) => Err(SyntaxError(format!(
+            t => Err(SyntaxError(format!(
                 "Invalid token type! Expected a literal, \
                 but found `{0}` at {1}!",
                 t, loc
             ))),
-
-            None => Err(Self::unexpected_eof_while("parsing literal", loc)),
         }
     }
 
@@ -437,86 +574,83 @@ impl<'t> Parser<'t> {
     ///
     /// *Note:* For `(` EXPR `)`, the future linter should flag this as redundant
     fn parentheses(&mut self) -> Result<Expr, SyntaxError> {
-        self.eat(&Token::ParenL)?;
-        let loc = self.loc();
+        use Token::{ParenR, ParenL, Comma, Operator}; 
+        self.eat(&ParenL)?;
         match self.peek() {
-            // first thing's first -- left-recursion
-            Some(Token::ParenL) => {
-                self.eat(&Token::ParenL)?;
-                if self.match_curr(&Token::ParenR) {
-                    self.eat(&Token::ParenR)?;
-                    Ok(Expr::Tuple(vec![]))
+            Some(ParenR) => {
+                self.eat(&ParenR)?;
+                Ok(Expr::Tuple(vec![]))
+            }
+            Some(Comma) => {
+                self.eat(&Comma)?;
+                self.eat(&ParenR)?;
+                Ok(Expr::Ident(Var::Ident(",".into())))
+            }
+            Some(Operator(..)) => {
+                let loc = self.loc(); 
+                let infix = self.take_next().as_operator().unwrap();
+                if matches!(self.peek(), Some(ParenR)) {
+                    self.eat(&ParenR)?;
+                    return Ok(Expr::Ident(Var::Infix(infix)))
+                };
+                // let fixity = self.fixities.get(&infix).copied();
+                if let Some(Fixity { prec, ..}) = self
+                    .fixities
+                    .get(&infix)
+                    .cloned() {
+                    let right = Box::new(self.binary(prec, 
+                        &mut Self::terminal)?);
+                    self.eat(&ParenR)?;
+                    let section = Expr::Section(Section::Right { infix, right });
+                    self.maybe_app(loc, section)
                 } else {
-                    let first = self.expression()?;
-                    self.tuple_or_app(first)
+                    Err(SyntaxError(format!(
+                        "Operator section error! The operator `{}` \
+                        at {} does not have a defined fixity.", 
+                        infix, loc
+                    )))
                 }
             }
-
-            // Empty tuple -- should this be its own AST node? probably not
-            Some(Token::ParenR) => self
-                .eat(&Token::ParenR)
-                .and_then(|_| Ok(Expr::Tuple(vec![]))),
-
-            Some(Token::Operator(_)) => {
-                let oploc = self.loc();
-                let op = self.take_next().as_operator().unwrap();
-                if self.match_curr(&Token::ParenR) {
-                    self.take_next();
-                    Ok(Expr::Ident(Var::Infix(op)))
-                } else {
-                    if self.fixities.get(&op).is_some() {
-                        let right = Box::new(self.expression()?);
-                        Ok(Expr::Section(Section::Right {
-                            infix: op, 
-                            right
-                        }))
-                    } else {
-                        Err(SyntaxError(format!(
-                            "Invalid operator for right section! The operator \
-                            `{}` at {} has not had a fixity or precedence \
-                            defined", op, oploc
-                        )))
+            _ => {
+                let (_, head) = self.subexpression()?;
+                match self.peek() {
+                    Some(ParenR) => {
+                        self.eat(&ParenR)?;
+                        Ok(head)
                     }
-
+                    Some(Comma) => {
+                        self.eat(&Comma)?;
+                        let (mut items, _) = self.many_while(|t| matches!(t, Comma), Self::expression)?;
+                        // let mut items = self.delimited(Comma, Comma, ParenR, |p| p.subexpression().and_then(|(_, x)| Ok(x)))?;
+                        items.insert(0, head);
+                        self.eat(&ParenR)?;
+                        Ok(Expr::Tuple(items))
+                    }
+                    Some(Operator(..)) => {
+                        let loc = self.loc();
+                        let infix = self.take_next().as_operator().unwrap();
+                        if matches!(self.peek(), Some(ParenR)) {
+                            self.eat(&ParenR)?;
+                            return Ok(Expr::Section(Section::Left { infix, left: Box::new(head) }));
+                        } else {
+                                Err(SyntaxError(format!(
+                                    "Operator section error! The operator `{}` \
+                                    at {} did not have its parentheses closed.", 
+                                    infix, loc
+                                )))
+                            }
+                    }
+                    _ => {
+                        let mut args = vec![];
+                        while !self.is_done() && !self.match_curr(&ParenR) {
+                            let (_, arg) = self.subexpression()?;
+                            args.push(arg);
+                        }
+                        self.eat(&ParenR)?;
+                        Ok(Expr::App { func: Box::new(head), args })
+                    }
                 }
             }
-
-            // if we see something we know is NOT callable, we either have a left section, tuple, or reduncantly wrapped expression
-            Some(Token::Char(_)
-            | Token::Str(_)
-            | Token::Num {..}
-            | Token::Bytes(..)) => {
-                let first = Expr::Lit(
-                    // since we know it won't fail, we can unwrap this
-                    Literal::from_token(self.take_next()
-                ).unwrap());
-                self.tuple_or_app(first)
-            }
-
-            // if we see a keyword, we know it must either be a redundantly wrapped expression, an application, or a tuple
-            Some(
-            Token::Kw(Keyword::Let) 
-            | Token::Kw(Keyword::Case) 
-            | Token::Kw(Keyword::If)
-            // and any other tokens that would form either a reduntantly wrapped expression, an application, or a tuple
-            | Token::Ident(_)
-            | Token::BrackL
-            ) => {
-                let first = self.expression()?;
-                self.tuple_or_app(first)
-            }
-
-            // Terminals we reject. This will probably be heavily modified as 
-            // it will reject anything we haven't caught up until now.
-            Some(t) => 
-                Err(SyntaxError(format!(
-                    "Invalid token `{}` found at {} while parsing inner \
-                    contents of a grouuped expression!", t, loc
-                )))
-            ,
-            None => 
-                Err(Self::unexpected_eof_while(
-                    "parsing inner contents of grouped expression", loc)),
         }
     }
 
@@ -525,87 +659,10 @@ impl<'t> Parser<'t> {
             let left = p.take_next();
             match p.peek() {
                 Some(Token::Comma) => Ok((left, None)),
-                _ => Ok((left, Some(p.expression()?))),
+                _ => Ok((left, Some(p.subexpression()?.1))),
             }
         })?;
         Ok(Expr::Record { proto, fields })
-    }
-
-    fn tuple_or_app(&mut self, head: Expr) -> Result<Expr, SyntaxError> {
-        let loc = self.loc();
-        match self.peek() {
-            Some(Token::ParenL) => {
-                let args = self
-                    .eat(&Token::ParenL)
-                    .and_then(|p| {
-                        p.many_while(|t| !matches!(t, Token::ParenR), &mut Self::expression)
-                    })
-                    .and_then(|(args, p)| p.eat(&Token::ParenR).and_then(|_| Ok(args)))?;
-                Ok(Expr::App {
-                    func: Box::new(head),
-                    args,
-                })
-            }
-
-            // tuple
-            Some(Token::Comma) => {
-                let mut rest = self.delimited(
-                    Token::Comma,
-                    Token::Comma,
-                    Token::ParenR,
-                    &mut Self::expression,
-                )?;
-                rest.insert(0, head);
-                Ok(Expr::Tuple(rest))
-            }
-
-            // trivially wrapped
-            Some(Token::ParenR) => self.eat(&Token::ParenR).and_then(|_| Ok(head)),
-
-            Some(Token::Eof) | None => Err(Self::unexpected_eof_while(
-                "parsing tail of grouped expression \
-                    (`tuple_or_app`) at {}",
-                loc,
-            )),
-
-            _ => self.application(head),
-        }
-    }
-
-    // stops after seeing a semicolon OR after more than 1 consecutive line break
-    // Comments may be used to extend the number of empty rows allowed, since comments are still lexed and lazily parsed.
-    fn application(&mut self, head: Expr) -> Result<Expr, SyntaxError> {
-        let mut args = vec![];
-        let mut row = self.get_row();
-
-        // let mut col = self.get_col();
-        'tail: loop {
-            if matches!(self.peek(), Some(Token::Comment(..))) {
-                let comment = self.take_next().as_comment().unwrap();
-                self.comments.push(comment);
-                row = self.get_row();
-                continue 'tail;
-            }
-
-            if self.is_done() || self.match_curr(&Token::Semi) {
-                break;
-            }
-
-            args.push(self.expression()?);
-
-            if matches!(self.peek(), Some(Token::Comment(..))) {
-                continue 'tail;
-            }
-
-            if self.get_row() - row > 1 {
-                break;
-            }
-        }
-
-        Ok(Expr::App {
-            func: Box::new(head),
-            args,
-        })
     }
 
     /// Named application declarations are syntactic sugar for
@@ -629,13 +686,23 @@ impl<'t> Parser<'t> {
     ///     (0, _) -> 0
     ///     (x, y) -> x * y
     /// ```
-    fn named_pats(&mut self,) {}
+    fn named_pats(&mut self,) {
+        todo!()
+    }
 
     fn let_expr(&mut self) -> Result<Expr, SyntaxError> {
-        todo!()
-        // let named = self.peek()
-        //     .and_then(|t| matches!(t, Token::Ident(..)))
-        //     .unwrap_or_else(|| false);
+        self.eat(&Token::Kw(Keyword::Let))?;
+        let mut bind = vec![];
+        while !self.is_done() && !self.match_curr(&Token::Kw(Keyword::In)) {
+            let pat = self.lambda_arg()?;
+            self.eat(&Token::Eq)?;
+            let (_, expr) = self.subexpression()?;
+            bind.push(Binding { pat, expr });
+            if self.match_curr(&Token::Comma) { self.take_next(); };
+        }
+        self.eat(&Token::Kw(Keyword::In))?;
+        let body = Box::new(self.subexpression()?.1);
+        Ok(Expr::Let { bind, body })
     }
 
     fn brackets(&mut self) -> Result<Expr, SyntaxError> {
@@ -661,13 +728,13 @@ impl<'t> Parser<'t> {
             Some(Token::Kw(Case)) => self.case_expr(),
             Some(Token::Kw(If)) => self.conditional_expr(),
             Some(Token::Bang | Token::Operator(Operator::Reserved(BinOp::Minus))) => self.unary(),
-            Some(Token::Operator(_)) => {
-                // TODO: offload to `operator` method
-                // since this is predicated on having matched an operator, it is safe to unwrap the results of the `Token`'s `as_operator` method call
-                Ok(Expr::Ident(Var::Infix(
-                    self.take_next().as_operator().unwrap(),
-                )))
-            }
+            // Some(Token::Operator(_)) => {
+            //     // TODO: offload to `operator` method
+            //     // since this is predicated on having matched an operator, it is safe to unwrap the results of the `Token`'s `as_operator` method call
+            //     Ok(Expr::Ident(Var::Infix(
+            //         self.take_next().as_operator().unwrap(),
+            //     )))
+            // }
             Some(Token::Comment(_)) => {
                 let comment = self.take_next().as_comment().unwrap();
                 self.comments.push(comment);
@@ -680,10 +747,12 @@ impl<'t> Parser<'t> {
                 Ok(Expr::Ident(Var::Ident(self.take_next().get_string())))
             }
 
-            Some(Token::Sym(..)) => Ok(Expr::Lit(Literal::Sym(self.take_next().get_string()))),
+            Some(Token::Sym(..)) => Ok(Expr::Ident(Var::Cons(self.take_next().get_string()))),
 
             Some(Token::Char(_) | Token::Str(_) | Token::Bytes(_) | Token::Num { .. }) => {
-                Ok(Expr::Lit(Literal::from_token(self.take_next()).unwrap()))
+                self.with_next(|t, p| p.literal(t))
+                // self.literal(self.take_next())
+                // Ok(Expr::Lit(Literal::from_token(self.take_next()).unwrap()))
             }
 
             Some(Token::Kw(kw)) => Err(SyntaxError(format!(
@@ -692,7 +761,7 @@ impl<'t> Parser<'t> {
                 kw, loc
             ))),
 
-            Some(Token::Error { data, msg, pos }) => Err(SyntaxError(format!(
+            Some(Token::Invalid { data, msg, pos }) => Err(SyntaxError(format!(
                 "Lexer error at Lexer[{0}] (Parser[{1}])!\n\
                 \tread: {2}\n\tmessage: {3}\n\t",
                 pos, loc, data, msg
@@ -760,7 +829,7 @@ impl<'t> Parser<'t> {
                             Comma, 
                             ParenR, 
                             Self::lambda_arg)?;
-                        rest.insert(0, Pat::Ctor(sym, Vec::new()));
+                        rest.insert(0, Pat::Var(sym));
                         Ok(Pat::Tuple(rest))
 
                     }
@@ -834,7 +903,7 @@ impl<'t> Parser<'t> {
                 self.grouped_lambda_arg()
             }
 
-            Some(Token::Error { data, msg, pos }) => Err(SyntaxError(format!(
+            Some(Token::Invalid { data, msg, pos }) => Err(SyntaxError(format!(
                 "Invalid token while parsing lambda arguments. \
                 Lexer provided the following error for `{}` \
                 at {}:\n\t{}",
@@ -862,7 +931,7 @@ impl<'t> Parser<'t> {
             Self::lambda_arg)?;
 
         self.eat(&ArrowR)?;
-        let body = self.expression()?;
+        let (_, body) = self.subexpression()?;
         Ok(pats
             .into_iter()
             .rev()
@@ -874,6 +943,181 @@ impl<'t> Parser<'t> {
 
     fn unexpected_eof_while(action: &str, loc: Location) -> SyntaxError {
         SyntaxError(format!("Unexpected EOF at {} while {}!", loc, action))
+    }
+
+    //-------- DECLARATIONS
+
+    /// After parsing top-level module stuff, parse declarations
+    fn declaration(&mut self) -> Result<Decl, SyntaxError> {
+        let loc = self.loc(); 
+        match self.peek() {
+            Some(Token::Kw(Keyword::InfixL | Keyword::InfixR)) => {
+                let fixity = self.fixity_spec()?;
+                let infixes = self.with_fixity(fixity)?;
+                Ok(Decl::Infix { fixity, infixes })
+            }
+            Some(Token::Kw(Keyword::Data)) => {
+                self.data_decl()
+            }
+            Some(t) => {
+                Err(SyntaxError(format!(
+                    "Invalid token `{}` at {} while parsing body declarations!", t, loc
+                )))
+            }
+            None => {
+                Err(Self::unexpected_eof_while("parsing body declarations", loc))
+            }
+        }
+    }
+
+    /// Parses a data declaration.
+    /// 
+    /// A data declaration consists of
+    ///     * Data type name
+    ///     * Data type variables (~ generics)
+    ///     * Data constructors/variants
+    ///         * variants may be fieldless
+    ///         * constructor + arguments
+    fn data_decl(&mut self) -> Result<Decl, SyntaxError> {
+        self.eat(&Token::Kw(Keyword::Data))?;
+        let loc = self.loc();
+        let name = match self.peek() {
+            Some(Token::Sym(..)) => {
+                Ok(Var::Cons(self.take_next().get_string()))
+            }
+            t => {
+                Err(SyntaxError(format!(
+                    "Invalid name used for data declaration! Expected a `Sym` token, but instead found `{:?}` at {}", t, loc
+                )))
+            }
+        }?;
+        let (poly, _) = self.many_while(
+            |t| !matches!(t, Token::Eq), 
+            |p| {
+                let loc = p.loc();
+                match p.peek() {
+                    Some(Token::Ident(_)) => Ok(Var::Ident(p
+                        .take_next()
+                        .get_string())), 
+
+                    Some(t) => Err(SyntaxError(format!(
+                        "Invalid token found at {} while parsing data declaration type variables! \
+                        Expected a token of variant `Ident`, but found `{}`", loc, t))),
+                    None => Err(Self::unexpected_eof_while("parsing data declaration lhs type parameters", loc))
+                }
+            })?;
+        self.eat(&Token::Eq)?;
+        let variants = self.many_sep_by(
+            Token::Pipe, Self::data_variant)?;
+        let derives = if self.match_curr(&Token::Kw(Keyword::Derive)) {
+            self.take_next();
+            let loc = self.loc(); 
+            match self.peek() {
+                Some(Token::ParenL) => {
+                    self.delimited(
+                        Token::ParenL, Token::Comma, Token::ParenR, 
+                        |p| {
+                            let loc = p.loc();
+                            match p.peek() {
+                            Some(Token::Sym(_)) => {
+                                Ok(Var::Cons(p.take_next().get_string()))
+                            }
+                            Some(t) => {
+                                Err(SyntaxError(format!(
+                                    "Invalid token type while parsing data declaration derive clause at {}. Expected a `Sym` but found `{:?}`", 
+                                    loc, 
+                                    t
+                                )))
+                            }
+                            None => {
+                                Err(Self::unexpected_eof_while("parsing data declaration derivations", loc))
+                            }
+                        }})
+                }
+                Some(Token::Sym(_)) => {
+                    // safe to unwrap since we know `Token::Sym` successfully converts into a `Var::Cons`
+                    Ok(vec![self.take_next().try_into().unwrap()])
+                }
+                Some(t) => {
+                    Err(SyntaxError(format!(
+                        "Invalid token type while parsing data declaration derive clause at {}. Expected a `Sym` but found `{:?}`", 
+                        loc, 
+                        t
+                    )))
+                }
+                None => {
+                    Err(Self::unexpected_eof_while(
+                    "parsing data declaration derivations", 
+                    loc))
+                }
+            }
+        } else { Ok(vec![]) }?;
+        Ok(Decl::Data { name, poly, variants, derives })
+    }
+
+    fn data_variant(&mut self) -> Result<DataVariant, SyntaxError> {
+        todo!()
+        // match self.peek() {
+        //     Some(Token::Sym(_)) => {
+        //         let ctor = self.take_next().get_string();
+        //     }
+        //     _ => {}
+        // }
+    }
+
+    fn data_variant_args(&mut self) -> Result<Vec<TyPat<Var>>, SyntaxError> {
+        todo!()
+        // use Token::*; 
+        // match self.peek() {
+        //     Some(Pipe) => {}
+        //     Some(CurlyL) => {
+        //         // self.delimited(CurlyL, Comma, CurlyR, |p| )
+        //     }
+        //     Some(ParenL) => {}
+        //     Some(Ident(_)) => {
+        //         let ident = self.take_next();
+
+        //     }
+        //     Some(Sym()) => {}
+        //     _ => {}
+        // }
+    }
+
+    /// Reads a fixity keyword and precedence token to generate
+    /// a fixity to apply to following operators
+    fn fixity_spec(&mut self) -> Result<Fixity, SyntaxError> {
+        // associativity rule from keyword token
+        let assoc = self
+            .take_next()
+            .as_assoc_spec()
+            .map_err(|err| SyntaxError(format!("{}", err)))?;
+        // precedence
+        let prec = self
+            .take_next()
+            .as_u8()
+            .map_err(|err| SyntaxError(format!("{}", err)))?;
+        Ok(Fixity { assoc, prec })
+    }
+
+    fn with_fixity(&mut self, fixity: Fixity) -> Result<Vec<Operator>, SyntaxError> {
+        // let mut ops = vec![];
+        // let loc = self.loc();
+
+        self.many_while(|t| matches!(t, Token::Operator(_)), |p| {
+            let loc = p.loc();
+            let operator = p.take_next().as_operator();
+            if let Some(op) = operator {
+                if p.fixities.get(&op).is_some() {
+                    return Err(SyntaxError(format!("Fixity declaration error! The operator `{}` at {} already has a defined fixity.", op, loc)))
+                } else {
+                    p.fixities.insert(op.clone(), fixity);
+                }
+                Ok(op)
+            } else {
+                Err(Self::unexpected_eof_while(
+                    "parsing fixity spec at {}", loc))
+            }
+        }).and_then(|(ops, _)| Ok(ops))
     }
 }
 
@@ -896,11 +1140,6 @@ mod tests {
         })
     }
 
-    fn parser_with_expression(s: &str) -> Result<(Expr, Parser), SyntaxError> {
-        let mut parser = Parser::new(s);
-        parser.expression()
-            .and_then(|expr| Ok((expr, parser)))
-    }
 
     #[bench]
     fn bench_binary_expression(b: &mut Bencher) {
@@ -957,12 +1196,42 @@ mod tests {
     }
 
     #[test]
-    fn lambda_expr() {
-        let _ = echo_expr("\\a b -> a + b");
-        let _ = echo_expr("\\a -> \\b -> a + b");
-        let _ = echo_expr("\\(:A' a) -> a");
-        let _ = echo_expr("\\:A { a } -> a");
+    fn echo_exprs() {
+        // let _ = echo_expr("\\a b -> a + b");
+        // let _ = echo_expr("\\a -> \\b -> a + b");
+        // let _ = echo_expr("\\(:A' a) -> a");
+        // let _ = echo_expr("\\:A { a } -> a");
         let _ = echo_expr("(+) 1 2");
+        // let _ = echo_expr("(+3)");
+        // let _ = echo_expr("(c <| d / 9)");
+        // let _ = echo_expr("3+");
+        // let _ = echo_expr("let (a, b) = (1, 2) in a + b");
+
+        let srcs = [
+            "(+0)",
+            "(+) 1 2", 
+            "a |> b + c <| d", 
+            "let (a, b) = (1, 2) in a + b",
+            "case x + y of { (1, a) if a > 0 -> :True; _ -> :False }"
+        ];
+
+        for s in srcs {
+            println!("source: `{}`", &s);
+            let mut parser = Parser::new(s);
+            let xs = parser.many(|p| {
+                Ok((p.loc(), p.expression()?, p.loc(), p.peek().cloned().unwrap_or_else(|| Token::Eof)))
+            });
+            match xs {
+                Ok((res, _)) => {
+                    for (start, expr, end, tok) in res {
+                        println!("start: {}, end: {}, ended on: {}", start, end, tok);
+                        println!("{:#?}", expr);
+                    }
+                }
+                Err(e) => println!("{}", e)
+            }
+        }
+
     }
 
     #[bench]
@@ -976,5 +1245,89 @@ mod tests {
         b.iter(|| {
             test::black_box(Parser::new(source).expression())
         });
+    }
+
+    macro_rules! __ {
+        (:$ident:tt) => {
+            Expr::Ident(Var::Ident(stringify!($ident).into()))
+        };
+    }
+
+    #[test]
+    fn test_tuple() {
+
+        let pairs = [
+            ( "(,)", Ok(__!(:,))),
+            ("(a, b)", Ok(Expr::Tuple(vec![__!(:a), __!(:b)]))),
+            ("(a b, c)", Ok(Expr::Tuple(vec![
+                Expr::App { func: Box::new(__!(:a)), args: vec![__!(:b)] },
+                __!(:c)
+            ])))
+        ];
+        for (s, x) in pairs {
+            let expr = Parser::new(s).expression();
+            println!("{:?}", &expr);
+            assert_eq!(expr, x)
+        }
+    }
+
+    #[test]
+    fn test_delimited() {
+        use Token::{ParenL as L, Comma as C, ParenR as R};
+        let src = "(1, 2, 3)";
+        let mut parser = Parser::new(src);
+        let expr = parser.delimited(L, C, R, &mut Parser::subexpression);
+        println!("{:#?}", expr);
+    }
+
+    #[test]
+    fn test_offside_rule() {
+        use crate::compiler::parser::scan::Layout;
+        use crate::compiler::syntax::NumFlag;
+
+        // let sources = [
+        //     "3 + \n   4",
+        //     "a b c d",
+        //     "let sum = \n  \\x y -> x + y"
+        // ];
+
+        let mut parser = Parser::new("(3 + \n   4)");
+        let expr = parser
+            .within_offside(Token::is_terminal, |p| 
+                p.subexpression().and_then(|(_, x)| Ok(x)))
+            .and_then(|res| 
+                Ok(res.resolve(|x| x, |(func, args)| Expr::App {
+                    func: Box::new(func), 
+                    args 
+                })));
+        // println!("{:#?}", expr)
+        assert_eq!(expr, Ok(
+            Expr::Binary {
+                infix: Operator::Reserved(BinOp::Plus),
+                left: Box::new(
+                    Expr::Lit(
+                        Literal::Num { 
+                            data: "3".into(), 
+                            flag: NumFlag::Int 
+                        }
+                    )
+                ),
+                right: Box::new(
+                    Expr::Lit(Literal::Num { 
+                        data: "4".into(), 
+                        flag: NumFlag::Int
+                    })
+                )}))
+    }
+
+    #[test]
+    fn test_fixity() {
+        let src = "infixr 9 </> \n\n3 + 4 </> 7";
+        let mut parser = Parser::new(src);
+        let decl = parser.declaration();
+        println!("{:?}", parser.peek());
+        let expr = parser.expression();
+        println!("decl\n{:#?}\nexpr\n{:#?}", decl, expr)
+
     }
 }

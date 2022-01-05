@@ -1,7 +1,10 @@
+use crate::prelude::either::Either;
+
 use super::{
     expr::{Expr, Var},
     fixity::Fixity,
-    pattern::{Morpheme, Pat},
+    literal::Literal,
+    pattern::{Constraint, Morpheme, Pat, SigPat},
     Operator, Token,
 };
 
@@ -28,7 +31,7 @@ uncurry f x y = \(x, y) -> f x y
 
 */
 
-#[derive(Clone, Debug, PartialEq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Decl {
     Infix {
         fixity: Fixity,
@@ -36,38 +39,54 @@ pub enum Decl {
     },
     Data {
         name: Var,
+        constraints: Vec<Constraint<Var>>,
         poly: Vec<Var>,
         variants: Vec<DataVariant>,
         derives: Vec<Var>,
     },
+    // `
+    Where {
+        pat: Pat,
+        body: Vec<Expr>,
+        decls: Vec<Decl>,
+    },
     Function {
         name: Var,
-        defs: Vec<(Vec<Pat>, Expr)>,
-    },
-    Module {
-        name: Var,
+        defs: Vec<Clause>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Hash)]
-pub struct FnEquation {
-    lhs: Vec<Pat>,
-    rhs: Expr,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Stmt {
+    /// Bind an expression to a pattern. `p <- x`
+    Bind { pat: Pat, expr: Expr },
 }
 
-#[derive(Clone, Debug, PartialEq, Hash)]
+/// `[`:pats`]` = `:body` where `:decls`
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Clause {
+    pub pats: Vec<Pat>,
+    pub body: Vec<Expr>,
+    pub decls: Vec<Decl>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DataVariant {
-    ctor: Var,
-    args: Vec<TyPat<Var>>,
+    pub ctor: Var,
+    pub args: Either<DataPat, ()>,
 }
 
-#[derive(Clone, Debug, PartialEq, Hash)]
-pub enum TyPat<T> {
-    Var(T),
-    Ctor(T),
-    Tuple(Vec<Self>),
-    List(Vec<Self>),
-    Fields(Vec<(T, Self)>),
-    Group(T, Vec<Self>),
-    Arrow(Box<Self>, Box<Self>),
+pub type FieldPat = (Var, Type);
+pub type Type = SigPat<Var>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DataPat {
+    Args(Vec<Type>),
+    Keys(Vec<FieldPat>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TyParam<T> {
+    Just(T),
+    Given(Constraint<T>),
 }

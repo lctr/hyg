@@ -572,6 +572,7 @@ impl<'t> Lexer<'t> {
             "\\" => Token::Lambda,
             "->" => Token::ArrowR,
             "<-" => Token::ArrowL,
+            "=>" => Token::FatArrow,
             s => {
                 if let Some(op) = BinOp::from_str(s) {
                     Token::Operator(Operator::Reserved(op))

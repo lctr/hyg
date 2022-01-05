@@ -151,6 +151,27 @@ pub trait Combinator<'t>: Consume<'t> {
         Ok(nodes)
     }
 
+    /// Checks the current token, applying the parser if a match
+    /// is found **without consuming the separator**.  
+    fn try_many_sep_by<F, X>(
+        &mut self,
+        sep: Self::Peeked,
+        mut parse: F,
+    ) -> Result<Vec<X>, Self::Error>
+    where
+        F: FnMut(&mut Self) -> Result<X, Self::Error>,
+    {
+        let mut nodes = vec![];
+        loop {
+            if self.is_done() || !self.match_curr(&sep) {
+                break;
+            }
+
+            nodes.push(parse(self)?)
+        }
+        Ok(nodes)
+    }
+
     /// Applies the given parser repeatedly until failure.
     /// Returns a tuple of the results and a mutable reference to
     /// the underlying container, wrapped in an `Ok` variant on success.

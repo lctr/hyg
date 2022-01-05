@@ -6,35 +6,32 @@ use super::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Name<T>(T);
-
-impl<T> From<T> for Name<T> {
-    fn from(t: T) -> Self {
-        Self(t)
-    }
-}
-
-impl<T> Newtype for Name<T> {
-    type Inner = T;
-
-    fn get_ref(&self) -> &Self::Inner {
-        &self.0
-    }
-
-    fn get_mut(&mut self) -> &mut Self::Inner {
-        &mut self.0
-    }
-
-    fn take(self) -> Self::Inner {
-        self.0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Var {
+    /// Used for identifiers
     Ident(String),
+    /// Used for operators
     Infix(Operator),
+    /// Used for data constructors
     Cons(String),
+    /// Used for classes -- play same syntactic role as TyCons,
+    /// but within constraints?
+    Class(String),
+}
+
+impl std::fmt::Display for Var {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Var::Ident(s)
+            | Var::Cons(s)
+            | Var::Class(s) => {
+                write!(f, "{}", s)
+            }
+            Var::Infix(x) => write!(f, "{}", x),
+        }
+    }
 }
 
 impl std::convert::TryFrom<Token> for Var {
@@ -66,6 +63,7 @@ pub enum Expr {
     ///
     /// Another way of thinking about it is that `Expr::Array`s are treated eagerly, may not grow, and have a size known at compile time. The same cannot be said for `Expr::List`s.
     Array(Vec<Expr>),
+    // TODO!!!!
     /// On the other hand, a `List` variant for `Expr` is a list comprehension
     /// and inherently lazy.
     ///
@@ -79,8 +77,14 @@ pub enum Expr {
         bind: Vec<Binding>,
         pred: Vec<Expr>,
     },
+    // unsure whether it's best to curry all lambda's during parsing
     Lam {
         arg: Pat,
+        body: Box<Expr>,
+    },
+    #[allow(unused)]
+    Lambda {
+        args: Vec<Pat>,
         body: Box<Expr>,
     },
     App {

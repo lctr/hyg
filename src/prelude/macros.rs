@@ -52,6 +52,13 @@ macro_rules! strenum {
                     $($opk::$name => {$lit})+
                 }
             }
+            pub fn all_variants() -> Vec<Self> {
+                let mut variants = vec![];
+                $(
+                    variants.push(Self::$name);
+                )*
+                variants
+            }
         }
     };
     (each $id:ident $is_kind:ident ::

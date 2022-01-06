@@ -1,3 +1,5 @@
+use crate::prelude::either::Either;
+
 use super::{NumFlag, Token};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -7,8 +9,6 @@ pub enum Literal {
     Bytes(Vec<u8>),
     // identical to internal data for a `Token` of variant `Num`. Not read until evaluation as they may be overloaded, e.g., the flags `Dec` and `Sci` may become f32 or f64.
     Num { data: String, flag: NumFlag },
-    // used for constants/data constructor names
-    Sym(String),
 }
 
 impl Literal {
@@ -31,7 +31,6 @@ impl Literal {
     /// *Note:* Unlike the `is_token_literal` method, this method ACCEPTS `Sym` `Token` variants.
     pub fn from_token(token: Token) -> Option<Self> {
         match token {
-            Token::Sym(s) => Some(Self::Sym(s)),
             Token::Char(c) => Some(Self::Char(c)),
             Token::Str(s) => Some(Self::Str(s)),
             Token::Bytes(bs) => Some(Self::Bytes(bs)),
@@ -43,11 +42,27 @@ impl Literal {
     }
 }
 
+impl std::fmt::Display for Literal {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Literal::Char(c) => write!(f, "'{:?}'", c),
+            Literal::Str(s) => write!(f, "\"{}\"", s),
+            Literal::Bytes(bs) => write!(f, "{:?}", bs),
+            Literal::Num { data, .. } => {
+                write!(f, "{}", data)
+            }
+        }
+    }
+}
+
 /// Error type for `Token` -> `Literal` conversions
 #[derive(
     Debug, Copy, Clone, Hash, PartialEq, Eq, Default,
 )]
-pub struct LitErr {}
+pub struct LitErr;
 
 impl LitErr {
     pub const MSG: &'static str =
@@ -67,9 +82,7 @@ impl std::fmt::Display for LitErr {
 
 impl std::error::Error for LitErr {
     fn description(&self) -> &str {
-        "The argument provided was unable to be converted into a `Literal`! \n\
-        `Token`s only successfully convert into `Literal`s if their variant \n\
-        is one of the following: `Sym`, `Char`, `Str`, `Bytes`, `Num`."
+        LitErr::MSG
     }
 }
 
@@ -77,14 +90,205 @@ impl std::convert::TryFrom<Token> for Literal {
     type Error = LitErr;
     fn try_from(value: Token) -> Result<Self, Self::Error> {
         match value {
-            Token::Sym(s) => Ok(Self::Sym(s)),
             Token::Char(c) => Ok(Self::Char(c)),
             Token::Str(s) => Ok(Self::Str(s)),
             Token::Bytes(bs) => Ok(Self::Bytes(bs)),
             Token::Num { data, flag } => {
                 Ok(Self::Num { data, flag })
             }
-            _ => Err(LitErr {}),
+            _ => Err(LitErr),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for f64 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseFloatError if `Num` type
+    type Error = Either<Token, std::num::ParseFloatError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<f64>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for f32 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseFloatError if `Num` type
+    type Error = Either<Token, std::num::ParseFloatError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<f32>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for usize {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<usize>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for isize {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<isize>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for i8 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<i8>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for u16 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<u16>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for i16 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<i16>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for u32 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<u32>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for i32 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<i32>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for u64 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<u64>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for i64 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<i64>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
+        }
+    }
+}
+
+impl std::convert::TryFrom<Token> for u128 {
+    /// On failure, return the token if not a `Num` type,
+    /// or a ParseIntError if `Num` type
+    type Error = Either<Token, std::num::ParseIntError>;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Num { data, .. } => {
+                str::parse::<u128>(data.as_str())
+                    .map_err(Either::Right)
+            }
+            _ => Err(Either::Left(value)),
         }
     }
 }

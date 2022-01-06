@@ -138,3 +138,70 @@ impl<L, R> Either<L, R> {
         }
     }
 }
+
+impl<L, R> Eq for Either<L, R>
+where
+    L: Eq,
+    R: Eq,
+{
+}
+
+impl<L, R> std::cmp::PartialEq for Either<L, R>
+where
+    L: std::cmp::PartialEq,
+    R: std::cmp::PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Left(lx), Self::Left(ly)) => lx == ly,
+            (Self::Right(rx), Self::Right(ry)) => rx == ry,
+            _ => false,
+        }
+    }
+}
+
+impl<L, R> std::hash::Hash for Either<L, R>
+where
+    L: std::hash::Hash,
+    R: std::hash::Hash,
+{
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Either::Left(l) => l.hash(state),
+            Either::Right(r) => r.hash(state),
+        }
+    }
+}
+
+impl<L, R> std::fmt::Debug for Either<L, R>
+where
+    L: std::fmt::Debug,
+    R: std::fmt::Debug,
+{
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Either::Left(l) => {
+                f.debug_tuple("Left").field(l).finish()
+            }
+            Either::Right(r) => {
+                f.debug_tuple("Right").field(r).finish()
+            }
+        }
+    }
+}
+
+impl<L, R> Clone for Either<L, R>
+where
+    L: Clone,
+    R: Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Either::Left(l) => Either::Left(l.clone()),
+            Either::Right(r) => Either::Right(r.clone()),
+        }
+    }
+}

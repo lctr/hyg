@@ -62,8 +62,15 @@ pub trait Newtype {
     }
 }
 
-/// Utility marker trait. Associated type `Id` should implement `Eq`.
-/// TODO: Should the `Eq` bound be changed for `std::cmp::PartialEq`?
 pub trait Identity {
-    type Id: Eq;
+    type Id: PartialEq;
+    fn id(self) -> Self::Id;
+}
+
+pub trait Intern {
+    type Key;
+    type Value: ?Sized;
+
+    /// Stores the given value if it is not currently already stored. Returns the key used by the `Self` to retrieve the stored value.
+    fn intern(&mut self, value: &Self::Value) -> Self::Key;
 }

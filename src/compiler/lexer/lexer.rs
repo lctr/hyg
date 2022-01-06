@@ -7,7 +7,7 @@ use super::{
 
 use crate::prelude::{
     span::{Location, Positioned},
-    traits::Peek,
+    traits::{Peek, Intern}, symbol::{Symbol, Lexicon},
 };
 
 pub const COMMENT_OUTER: char = '*';
@@ -19,7 +19,7 @@ pub const ESCAPE: char = '\\';
 pub const UNDER: char = '_';
 pub const PRIME: char = '\'';
 pub const STR_PREFIXES: &'static str = "brfm";
-pub const OP_CHARS: &'static str = "!$%^&*-+/|<>=?:\\@#`";
+pub const OP_CHARS: &'static str = "!$%^&*-+/|<>=?:\\@#~";
 
 #[derive(Clone, Debug)]
 pub struct Lexer<'t> {
@@ -27,6 +27,16 @@ pub struct Lexer<'t> {
     current: Option<Token>,
     queue: Vec<Token>,
     pub spans: Vec<Location>,
+    // setting as public since it will be taken by the parser, etc
+    pub lexicon: Lexicon
+}
+
+impl<'t> Intern for Lexer<'t> {
+    type Key = Symbol;
+    type Value = str;
+    fn intern(&mut self, value: &Self::Value) -> Self::Key {
+        self.intern_str(value)
+    }
 }
 
 impl<'t> Positioned for Lexer<'t> {
@@ -37,14 +47,56 @@ impl<'t> Positioned for Lexer<'t> {
     }
 }
 
+impl Default for Lexicon {
+    fn default() -> Self {
+        let mut lexicon = Lexicon::with_capacity(Lexicon::BASE_CAPACITY);
+        for kw in Keyword::all_variants() {
+            lexicon.intern(kw.as_str());
+        }
+        for binop in BinOp::all_variants() {
+            lexicon.intern(binop.as_str());
+        }
+        {
+            use Token::*;
+            let toksyms = [
+                Lambda, ColonEq, Underscore,
+                Eq, At, Dot, Dot2, Dot3, Semi,
+                Colon, Colon2, Comma, Pound, 
+                Bang, ParenL, ParenR, BrackL,
+                BrackR, CurlyL, CurlyR, Pipe,
+                ArrowR, ArrowL, FatArrow,
+            ];
+            for tok in toksyms { 
+                lexicon.intern(&*tok.to_string()); 
+            }
+        };
+        lexicon
+    }
+}
+
 impl<'t> Lexer<'t> {
     pub fn new(src: &'t str) -> Self {
         Self {
             source: Source::new(src),
             current: None,
-            queue: vec![],
-            spans: vec![],
+            queue: Vec::new(),
+            spans: Vec::new(),
+            lexicon: Lexicon::default()
         }
+    }
+
+    pub fn with_lexicon(src: &'t str, lexicon: Lexicon) -> Self {
+        Self {
+            source: Source::new(src),
+            current: None,
+            queue: Vec::new(),
+            spans: Vec::new(),
+            lexicon
+        }
+    }
+
+    pub fn intern_str(&mut self, s: &str) -> Symbol {
+        self.lexicon.intern(s)
     }
 
     fn peek_char(&mut self) -> Option<&char> {
@@ -161,7 +213,9 @@ impl<'t> Lexer<'t> {
                 Token::Lambda
             }
             Some(c) if OP_CHARS.contains(*c) => {
-                Token::Operator(Operator::Custom(format!("\\{}",self.next_while(|c| OP_CHARS.contains(c)))))
+                let buf = self.next_while(|c| OP_CHARS.contains(c));
+                let sym = self.intern_str(&*format!("\\{}", buf));
+                Token::Operator(Operator::Custom(sym))
             }
             _ => Token::Lambda
         }
@@ -256,16 +310,19 @@ impl<'t> Lexer<'t> {
                 Token::ColonEq
             }
             Some(c) if OP_CHARS.contains(c) => {
-                Token::Ident(format!(
+                let buf = format!(
                     ":{}",
                     self.next_while(
                         |c| OP_CHARS.contains(c)
                     )
-                ))
+                );
+                let symbol = self.intern_str(&*buf);
+                Token::Lower(symbol)
             }
-            Some(c) if is_ident_start(c) => Token::Sym(
-                self.next_while(|c| is_ident_char(c)),
-            ),
+            Some(c) if is_ident_start(c) => {
+                let buf = self.next_while(|c| is_ident_char(c));
+                let symbol = self.intern_str(&*buf);
+                Token::Upper(symbol)},
             _ => Token::Colon,
         }
     }
@@ -308,7 +365,7 @@ impl<'t> Lexer<'t> {
                 _ => {
                     let tok = self.token();
                     self.queue.push(tok);
-                    Token::Ident(COMMENT_INNER.into())
+                    Token::Tilde
                 }
             }
         } else {
@@ -331,10 +388,10 @@ impl<'t> Lexer<'t> {
             Token::Kw(kw)
         } else {
             (if _start.is_uppercase() {
-                Token::Sym
+                Token::Upper
             } else {
-                Token::Ident
-            })(buf)
+                Token::Lower
+            })(self.intern_str(&*buf))
         }
     }
 
@@ -577,7 +634,7 @@ impl<'t> Lexer<'t> {
                 if let Some(op) = BinOp::from_str(s) {
                     Token::Operator(Operator::Reserved(op))
                 } else {
-                    Token::Operator(buf.into())
+                    Token::Operator(Operator::Custom(self.intern_str(s)))
                 }
             }
         }
@@ -603,7 +660,9 @@ impl<'t> Lexer<'t> {
                             .next_char()
                             .unwrap_or('\0');
                         match self.ident(ch) {
-                                Token::Ident(s) => Token::Ident(format!("{}{}", c, s)),
+                                Token::Lower(s) => {
+                                    Token::Lower(self.intern_str(&*format!("{}{}", c, s)))
+                                },
                                 _ => Token::Invalid {
                                     data: ch.into(),
                                     msg: format!(
@@ -614,7 +673,7 @@ impl<'t> Lexer<'t> {
                                 },
                             }
                     }
-                    _ => Token::Ident(c.into()),
+                    _ => Token::Lower(self.intern_str(&*c.to_string())),
                 }
             }
             // TODO
@@ -812,14 +871,15 @@ mod test {
 
     #[test]
     fn lex_chars() {
-        let lexer = Lexer::new(
+        let mut lexer = Lexer::new(
             "\\:A a 1; . | # @ ## #> .. 3...5 'a' :b -> 2.0 <-",
         );
+        let mut intern = |s| lexer.intern_str(s);
 
         let expected = [
             Token::Lambda,
-            Token::Sym("A".into()),
-            Token::Ident("a".into()),
+            Token::Upper(intern("A")),
+            Token::Lower(intern("a")),
             Token::Num {
                 data: "1".into(),
                 flag: NumFlag::Int,
@@ -829,8 +889,8 @@ mod test {
             Token::Pipe,
             Token::Pound,
             Token::At,
-            Token::Operator(Operator::Custom("##".into())),
-            Token::Operator(Operator::Custom("#>".into())),
+            Token::Operator(Operator::Custom(intern("##"))),
+            Token::Operator(Operator::Custom(intern("#>"))),
             Token::Dot2,
             Token::Num {
                 data: "3".into(),
@@ -842,7 +902,7 @@ mod test {
                 flag: NumFlag::Int,
             },
             Token::Char('a'),
-            Token::Sym("b".into()),
+            Token::Upper(intern("b")),
             Token::ArrowR,
             Token::Num {
                 data: "2.0".into(),
@@ -850,7 +910,6 @@ mod test {
             },
             Token::ArrowL,
         ];
-
         lexer.into_iter().zip(expected.iter()).for_each(
             |(res, tok)| {
                 println!("{}", &res);
@@ -864,15 +923,15 @@ mod test {
         let mut lexer = Lexer::new("a :b c () [] {} + 1.2");
         assert_eq!(
             lexer.next(),
-            Some(Token::Ident("a".into()))
+            Some(Token::Lower(lexer.intern_str("a")))
         );
         assert_eq!(
             lexer.next(),
-            Some(Token::Sym(":b".into()))
+            Some(Token::Upper(lexer.intern_str(":b")))
         );
         assert_eq!(
             lexer.next(),
-            Some(Token::Ident("c".into()))
+            Some(Token::Lower(lexer.intern_str("c")))
         );
         assert_eq!(lexer.next(), Some(Token::ParenL));
         assert_eq!(lexer.next(), Some(Token::ParenR));
@@ -903,8 +962,10 @@ mod test {
         while !lexer.is_done() {
             let start = lexer.loc();
             let tok = lexer.next();
+            let lexicon = &lexer.lexicon;
+            let t = tok.as_ref().and_then(|t| Some(format!("{}", t.display(lexicon))));
             let end = lexer.loc();
-            println!("[{}]:\tstart: {}, token: {:?}, end: {}", &ct, start, tok, end);
+            println!("[{}]:\tstart: {}, token: {:?} `{:?}`, end: {}", &ct, start, tok, t, end);
             ct += 1; 
         }
         println!("{:#?}", lexer.spans)

@@ -1,32 +1,83 @@
 use std::collections::HashMap;
 
+use crate::prelude::either::Either;
+
 use super::{Assoc, BinOp, Operator};
+
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+pub struct Prec(u8);
+
+impl Prec {
+    pub const MAX: Self = Self(Operator::MAX_PREC);
+    pub const LAST: Self = Self(0);
+
+    pub fn new(precedence: u8) -> Self {
+        Self(precedence)
+    }
+}
+
+impl From<u8> for Prec {
+    fn from(prec: u8) -> Self {
+        Self(prec)
+    }
+}
+
+impl From<Prec> for u8 {
+    fn from(Prec(prec): Prec) -> Self {
+        prec
+    }
+}
 
 /// Configuration for operater precedence and associativity. This is the interface unifying predefined operator data (from `BinOp`) with user defined operators
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Fixity {
     pub(crate) assoc: Assoc,
-    pub(crate) prec: u8,
+    pub(crate) prec: Prec,
 }
 
 impl Default for Fixity {
     fn default() -> Self {
         Self {
             assoc: Assoc::Left,
-            prec: Operator::MAX_PREC,
+            prec: Prec::MAX,
         }
     }
 }
 
-#[derive(Debug)]
+impl From<Either<Prec, Prec>> for Fixity {
+    fn from(either: Either<Prec, Prec>) -> Self {
+        either.resolve(
+            |prec| Fixity {
+                assoc: Assoc::Left,
+                prec,
+            },
+            |prec| Fixity {
+                assoc: Assoc::Right,
+                prec,
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixityTable {
     operators: HashMap<Operator, Fixity>,
 }
 
 impl FixityTable {
+    #[allow(unused)]
     pub fn new() -> Self {
         Self {
             operators: HashMap::new(),
+        }
+    }
+
+    #[allow(unused)]
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            operators: HashMap::with_capacity(cap),
         }
     }
 
@@ -46,14 +97,6 @@ impl FixityTable {
         operator: &Operator,
     ) -> Option<&Fixity> {
         self.operators.get(operator)
-    }
-}
-
-impl Clone for FixityTable {
-    fn clone(&self) -> Self {
-        Self {
-            operators: self.operators.clone(),
-        }
     }
 }
 
@@ -89,7 +132,7 @@ impl Default for FixityTable {
                     (*op).into(),
                     Fixity {
                         assoc: op.get_assoc(),
-                        prec: op.get_prec() as u8,
+                        prec: (op.get_prec() as u8).into(),
                     },
                 )
             })

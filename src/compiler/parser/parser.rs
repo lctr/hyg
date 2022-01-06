@@ -1,34 +1,49 @@
-use std::convert::{TryInto, TryFrom};
+use std::convert::{TryInto};
 
-use crate::{compiler::{lexer::{
-    BinOp, Keyword, Lexer, Operator, Peek, Token,
-}, syntax::{expr::Binding, decl::{Decl, TyPat, DataVariant}}}, prelude::span::{Location, Positioned}};
+pub use crate::prelude::{
+    span::{
+        Location, Positioned
+    },
+    traits::Peek
+};
 
-use crate::compiler::syntax::{expr::{Expr, Match,  Section, Var}, literal::{Literal, LitErr}, pattern::Pat, fixity::{Fixity, FixityTable},};
+use crate::{
+    compiler::{
+        lexer::{
+            BinOp, Keyword, Lexer, Operator, Token,
+        }, 
+        syntax::{
+            name::Name,
+            expr::{
+                Binding, Expr, Match, Section
+            }, 
+            decl::{
+                Decl, DataVariant, Type, DataPat, TyParam
+            },
+            pattern::{Pat, Constraint}, 
+            literal::Literal, 
+            error::SyntaxError,
+            fixity::{
+                Fixity, FixityTable, Prec
+            }, 
+        }
+    }, prelude::{either::Either, traits::Intern, symbol::{Symbol, Lexicon}}, 
+};
 
-use super::{
-     
+pub use super::{
     scan::{Combinator, Consume, Layout},
     Comment,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SyntaxError(pub String);
-
-impl From<(String, Location)> for SyntaxError {
-    fn from((msg, loc): (String, Location)) -> Self {
-        Self(format!("{} at {}", msg, loc))
+impl<'t> Intern for Parser<'t> {
+    type Key = Symbol;
+    type Value = str;
+    fn intern(&mut self, value: &Self::Value) -> Self::Key {
+        self.lexer.intern_str(value)
     }
 }
 
-impl std::fmt::Display for SyntaxError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &(self.0))
-    }
-}
-
-
-
+#[derive(Debug)]
 pub struct Parser<'t> {
     lexer: Lexer<'t>,
     fixities: FixityTable,
@@ -67,9 +82,14 @@ impl<'t> Consume<'t> for Parser<'t> {
             Ok(self)
         } else {
             let pos = self.loc();
-            let curr = self.peek().unwrap_or_else(|| &Token::Eof);
+            let sym = self.peek().and_then(|t| t.get_symbol());
+            let curr = if let Some(s) = sym {
+                (&self.lexer.lexicon[s]).to_string()
+            } else {
+                format!("{}", self.peek().unwrap_or_else(|| &Token::Eof))
+            };
             Err(SyntaxError(format!(
-                "Expected {}, but found {} at {}",
+                "Expected `{}`, but found `{}` at {}",
                 token, curr, pos
             )))
         }
@@ -111,6 +131,25 @@ impl<'t> From<Lexer<'t>> for Parser<'t> {
     }
 }
 
+trait TokenLookup {
+    fn lookup_str(&self, lexicon: &Lexicon) -> String;
+}
+
+impl TokenLookup for Token {
+    fn lookup_str(&self, lexicon: &Lexicon) -> String {
+        match self {
+            Token::Upper(s) | Token::Lower(s) | Token::Operator(Operator::Custom(s)) => lexicon[*s].into(),
+            _ => format!("{}", self)
+        }
+    }
+}
+
+impl TokenLookup for Option<&Token> {
+    fn lookup_str(&self, lexicon: &Lexicon) -> String {
+        self.and_then(|t| Some(t.lookup_str(lexicon))).unwrap()
+    }
+}
+
 impl<'t> Parser<'t> {
     pub fn new(source: &'t str) -> Self {
         Self {
@@ -120,14 +159,550 @@ impl<'t> Parser<'t> {
         }
     }
 
-    pub fn expression(&mut self) -> Result<Expr, SyntaxError> {
-        // self.within_offside(Token::is_terminal, Self::infix_expr)
-        //     .and_then(|expr| Ok(expr.resolve(|x| x, 
-        //         |(func, args)| Expr::App { func: Box::new(func), args })))
+    pub fn parse() -> Result<(), SyntaxError> {
+        todo!()
+    }
 
+    //-------- DECLARATIONS
+
+    /// After parsing top-level module stuff, parse declarations
+    /// 
+    /// A declaration may be any of the following:
+    /// 
+    /// * Fixity declaration
+    ///     - 3 main nods
+    ///         1.) `infixl` OR `infixr`, 
+    ///         2.) `Num { flag: NumFlag::Int, ..}`
+    ///         3.) AT LEAST ONE `Operator`
+    ///     - must keep track of newly defined specs, as they will all need 
+    ///       their own respective implementations and we want to flag to the 
+    ///       user when said implementations are missing.
+    /// * Data declaration
+    /// * Type (alias) declaration
+    /// * Class declaration
+    /// * Function declaration
+    /// * Type signature (?)
+    fn declaration(&mut self) -> Result<Decl, SyntaxError> {
+        let loc = self.loc();
+        match self.peek() {
+            Some(Token::Kw(Keyword::InfixL | Keyword::InfixR)) => {
+                let fixity = self.fixity_spec()?;
+                let infixes = self.with_fixity(fixity)?;
+                Ok(Decl::Infix { fixity, infixes })
+            }
+            Some(Token::Kw(Keyword::Data)) => {
+                self.data_decl()
+            }
+            Some(_) => {
+                let sym = self.peek().and_then(|t| t.get_symbol());
+                let tok = if let Some(s) = sym {
+                    (&self.lexer.lexicon[s]).to_string()
+                } else {
+                    format!("{}", self.peek().unwrap_or_else(|| &Token::Eof))
+                };
+                Err(SyntaxError(format!(
+                    "Invalid token `{}` at {} while parsing body declarations!", tok, loc
+                )))
+            }
+            None => {
+                Err(Self::unexpected_eof_while("parsing body declarations", loc))
+            }
+        }
+    }
+
+    /// Type-level syntax: basically patterns with only type constructors, type 
+    /// variables, tuple/lists, and with the addition of low-precedence 
+    /// right-associative arrows for functions.
+    /// 
+    /// * note: the function arrow `->` is a special kind of right 
+    ///   associative where we basically give it precedence lower than 
+    ///   possible.
+    /// * consider the type signature of boolean `or`, which takes 
+    ///   two `Bool` arguments and returns a `Bool` type:
+    ///         
+    ///         Bool -> Bool -> Bool
+    ///       
+    ///   Since functions are currried, the above is equivalent to
+    ///         
+    ///         Bool -> (Bool -> Bool)
+    /// 
+    /// * we need to support some convoluted things that can be boiled down
+    ///   to a few rules:
+    ///     * an atom must by any sort of identifier
+    ///     * lists may only be of one type therefore must only have 1 node
+    ///     * tuples can have any number of any different kind of types
+    ///     * constructors are the default assumption for "apply"-like 
+    ///       patterns, e.g., `a b c d`. 
+    /// 
+    /// 
+    fn type_signature(&mut self) -> Result<Type, SyntaxError> {
+        self.maybe_arrow_sep(|p| {
+            // let first = p.type_atom()?;
+            p.within_offside(
+                Token::begins_pat, 
+                Self::type_atom)
+                .and_then(|res| 
+                    res.resolve(
+                        |ty| Ok(ty), 
+                        |(head, tail)| 
+                        Ok(Type::Apply(Box::new(head), tail))))
+        })
+    }
+
+    fn maybe_arrow_sep<F>(&mut self, mut f: F) -> Result<Type, SyntaxError> 
+    where
+        F: FnMut(&mut Self) -> Result<Type, SyntaxError> 
+    {
+        let start = self.loc();
+        let mut left = f(self)?;
+
+        loop {
+            if self.is_done() {break;} 
+            if self.get_column() <= start.col {
+                break;
+            }
+            if matches!(self.peek(), Some(Token::Kw(_) | Token::Pipe)) { 
+                break; 
+            }
+
+
+            match self.peek() {
+                Some(Token::Semi | Token::Pipe) => {self.take_next(); break;}
+                Some(Token::ArrowR) => {
+                    while self.match_curr(&Token::ArrowR) {
+                        self.take_next();
+                        let right = f(self)?;
+                        left = Type::Arrow(Box::new(left), Box::new(right));
+                    }
+                }
+                _ => break
+
+            }
+        }
+
+        Ok(left)
+    }
+
+    fn grouped_types(&mut self) -> Result<Type, SyntaxError> {
+        use Token::*;
+        self.eat(&ParenL)?;
+        if self.match_curr(&ParenR) {
+            self.take_next();
+            return Ok(Type::Unit)
+        }
+
+        let first_ty = self.type_signature()?;
+
+        if self.match_curr(&ParenR) {
+            self.take_next();
+            return Ok(Type::Group(Box::new(first_ty)))
+        }
+
+        if self.match_curr(&Comma) {
+            let mut rest = self.delimited(Comma, Comma, ParenR, Self::type_signature)?;
+            rest.insert(0, first_ty);
+            return Ok(Type::Tuple(rest))
+        }
+
+        let (rest_tys, _) = self
+            .many_while(|t| !matches!(t, ParenR), 
+            Self::type_signature)?;
+
+        Ok(Type::Apply(Box::new(first_ty), rest_tys))
+    }
+
+    /// Helper for `type_sig`
+    fn type_atom(&mut self) -> Result<Type, SyntaxError> {
+        let loc = self.loc();
+        use Token::*; 
+        match self.peek() {
+            Some(ParenL) => self.grouped_types(),
+            Some(BrackL) => {
+                self.eat(&BrackL)?;
+                let ty = self.type_signature()?;
+                self.eat(&BrackR)?;
+                Ok(Type::List(Box::new(ty)))
+            }
+            Some(Lower(_)) => {
+                let s = self.take_next().get_symbol().unwrap();
+                Ok(Type::Var(Name::Ident(s)))
+            }
+            Some(Upper(_)) => {
+                let s = self.take_next().get_symbol().unwrap();
+                Ok(Type::TyCon(Name::Cons(s)))
+            }
+            Some(Underscore) => self.with_next(|_, _| Ok(Type::Anon)),
+
+            Some(t) => Err(SyntaxError(format!(
+                "Invalid type! Expected a token of type `Sym`, `Ident`, `(`, or `[`, but found `{:?}` at {}", t, loc
+            ))),
+            None => Err(Self::unexpected_eof_while("parsing type signature", loc))
+        }
+    }
+
+     /// Parses a data declaration.
+    /// 
+    /// A data declaration consists of
+    ///     * Data type name
+    ///     * Data type variables (~ generics)
+    ///     * Data constructors/variants
+    ///         * variants may be fieldless
+    ///         * constructor + arguments
+    fn data_decl(&mut self) -> Result<Decl, SyntaxError> {
+        self.eat(&Token::Kw(Keyword::Data))?;
+        let loc = self.loc();
+        let name = match self.peek() {
+            Some(Token::Upper(_)) => {
+                let sym = self.take_next().get_symbol().unwrap();
+                Ok(Name::Cons(sym))
+            }
+            t => {
+                Err(SyntaxError(format!(
+                    "Invalid name used for data declaration! Expected a `Sym` token, but instead found `{:?}` at {}", t, loc
+                )))
+            }
+        }?;
+
+        let mut constraints = vec![];
+        // type parameters on the lhs of a data decl must be either:
+        // Class name (`Sym`) + Type Variable (`Ident`)
+        if self.match_curr(&Token::ParenL) {
+            constraints = self.ty_constraints()?;
+        };
+
+        let poly = self.data_ty_vars()?;
+        self.eat(&Token::Eq)?;
+
+        let first = self.data_variant()?;
+        let mut variants = vec![first];
+
+        loop {
+            if self.is_done() { break; }
+
+            if matches!(self.peek(), Some(Token::Kw(_))) { break; }
+            if !self.match_curr(&Token::Pipe) { break; }
+
+            // if self.get_column() <= loc.col { break; }
+
+            if self.match_curr(&Token::Pipe) {
+                self.take_next();
+                variants.push(self.data_variant()?);
+            }
+        }
+        
+        self.maybe_derive_clause(name, constraints, poly, variants)
+    }
+
+    fn expect_var_ident(&mut self) -> Result<Name, SyntaxError> {
+        let loc = self.loc();
+        if !self.is_done() {
+            match self.peek() {
+                Some(Token::Lower(_)) => {
+                    let s = self.take_next().get_symbol().unwrap();
+                    Ok(Name::Ident(s))
+                },
+
+                Some(t) => Err(SyntaxError(format!(
+                    "Expected a type variable, but found `{:?}` at {}", t, loc
+                ))),
+
+                None => Err(Self::unexpected_eof_while(
+                    "parsing type variables", loc))
+            }
+        } else {
+            Err(Self::unexpected_eof_while("parsing type variables", loc))
+        }
+    }
+
+    fn ty_constraints(&mut self) -> Result<Vec<Constraint<Name>>, SyntaxError> {
+        let constraints = self.delimited(Token::ParenL, Token::Comma, Token::ParenR, 
+                |parser| {
+                    let loc = parser.loc();
+                    match parser.peek() {
+                        Some(Token::Upper(_)) => {
+                            let cl = Name::Class(parser.take_next().get_symbol().unwrap());
+                            let loc = parser.loc();
+
+                            match parser.peek() {
+                                Some(Token::Lower(_)) => {
+                                    let tyvar = Name::Ident(parser.take_next().get_symbol().unwrap());
+                                    Ok(Constraint(cl, tyvar))
+                                }
+                                t => {
+                                    Err(SyntaxError(format!(
+                                    "Unexpected token at {} in type constraint \
+                                    position! Expected either either an \
+                                    `Ident` or `Sym`, but found `{:?}`", 
+                                    loc, t)))
+                                }
+                            }
+                        }
+                        Some(Token::Lower(_)) => {
+                            let sym = parser.peek().and_then(|t| t.get_symbol());
+                            let tok = sym.and_then(|s| Some(&parser.lexer.lexicon[s]));
+                            Err(SyntaxError(format!(
+                                "Invalid token type at {}! Expected an uppercase token of type `Upper` for the 
+                                class constraint, but found type variable {}", loc, tok.unwrap_or_else(|| "")
+                            )))
+                        }
+                        Some(t) => {
+                            Err(SyntaxError(format!(
+                                "Unexpected token at {} in type constraint \
+                                position! Expected an uppercase token of \
+                                type `Upper`, but found `{:?}`", 
+                                loc, t
+                                
+                            )))
+                        }
+                        None => Err(Self::unexpected_eof_while("parsing type variables on left-hand side", loc))
+                    }
+        })?;
+        self.eat(&Token::FatArrow)?;
+        Ok(constraints)
+    }
+
+    fn data_ty_vars(&mut self) -> Result<Vec<Name>, SyntaxError> {
+        let loc = self.loc();
+        let mut poly = vec![];
+        if self.match_curr(&Token::Eq) {
+            return Ok(poly);
+        }
+    
+        loop {
+            if self.is_done() { break; }
+
+            if matches!(self.peek(), Some(Token::Kw(_))) { break; }
+
+            if self.get_column() <= loc.col && self.get_row() > loc.row { break; }
+
+            if self.match_curr(&Token::Eq) { break; }
+
+            poly.push(self.expect_var_ident()?);
+
+            if self.match_curr(&Token::Eq) { break; }
+        }
+    
+        Ok(poly)
+    }
+
+    fn maybe_derive_clause(&mut self, name: Name, constraints: Vec<Constraint<Name>>, poly: Vec<Name>, variants: Vec<DataVariant>) -> Result<Decl, SyntaxError> {
+        let derives = if !self.match_curr(&Token::Kw(Keyword::Derive)) {
+            Ok(vec![])
+        } else {
+            self.eat(&Token::Kw(Keyword::Derive))?;
+            let loc = self.loc(); 
+            match self.peek() {
+                Some(Token::ParenL) => {
+                    self.delimited(
+                        Token::ParenL, Token::Comma, Token::ParenR, 
+                        |p| {
+                            let loc = p.loc();
+                            match p.peek() {
+                            Some(Token::Upper(_)) => {
+                                let s = p.take_next().get_symbol().unwrap();
+                                Ok(Name::Class(s))
+                            }
+                            Some(t) => {
+                                Err(SyntaxError(format!(
+                                    "Invalid token type while parsing data declaration derive clause at {}. Expected a `Sym` but found `{:?}`", 
+                                    loc, 
+                                    t
+                                )))
+                            }
+                            None => {
+                                Err(Self::unexpected_eof_while("parsing data declaration derivations", loc))
+                            }
+                        }})
+                }
+                Some(Token::Upper(_)) => {
+                    let s = self.take_next().get_symbol().unwrap();
+                    Ok(vec![Name::Cons(s)])
+                }
+                Some(t) => {
+                    Err(SyntaxError(format!(
+                        "Invalid token type while parsing data declaration derive clause at {}. Expected a `Sym` but found `{:?}`", 
+                        loc, 
+                        t
+                    )))
+                }
+                None => {
+                    Err(Self::unexpected_eof_while(
+                    "parsing data declaration derivations", 
+                    loc))
+                }
+            }
+        }?;
+
+        Ok(Decl::Data { name, constraints, poly, variants, derives})
+    }
+
+    fn data_variant(&mut self) -> Result<DataVariant, SyntaxError> {
+        let loc = self.loc();
+        match self.peek() {
+            Some(Token::Upper(_)) => {
+                // safe to unwrap since we know it's got an interned symbol
+                let ctor = Name::Cons(self.take_next().get_symbol().unwrap());
+
+                if self.is_done() 
+                || matches!(self.peek(), Some(&Token::Pipe 
+                    | &Token::Kw(..))) {
+                    return Ok(DataVariant { ctor, args: Either::Right(()) });
+                }
+
+                if matches!(self.peek(), Some(&Token::CurlyL)) {
+                    return self
+                        .data_record_fields()
+                        .and_then(|fields| Ok(DataVariant { 
+                            ctor, 
+                            args: Either::Left(DataPat::Keys(fields))
+                        }));
+                }
+
+                let mut args = vec![];
+                loop {
+                    if matches!(self.peek(), Some(Token::Kw(..))) {break; }
+
+                    if self.match_curr(&Token::Pipe) {
+                        self.take_next();
+                    } 
+
+                    if self.is_done()  { break; }
+                    if self.get_column() <= loc.col { break; }
+
+                    if matches!(self.peek().and_then(|t| Some(Token::begins_pat(t))), Some(true)) {
+                        // args.push(self.type_signature()?);
+                        args.push(self.data_variant_arg()?);
+                    }
+                    
+                }
+                
+                Ok(DataVariant { ctor, args: Either::Left(DataPat::Args(args)) })
+            }
+            Some(t) => {
+                Err(SyntaxError(format!(
+                    "Invalid token found at {}! Expected a constructor, but found `{:?}`", loc, t
+                )))
+            }
+            None => Err(Self::unexpected_eof_while("parsing data variants", loc))
+        }
+    }
+
+    fn data_record_fields(&mut self) -> Result<Vec<(Name, Type)>, SyntaxError> {
+        use Token::*;
+        let loc = self.loc();
+        let t = self.delimited(CurlyL, Comma, CurlyR, 
+        |p| {
+            let name = match p.peek() {
+                Some(Lower(_)) => {
+                    Ok(Name::Ident(p.take_next().get_symbol().unwrap()))
+                }
+                Some(t) => {
+                    Err(SyntaxError(format!(
+                        "Invalid token found at {}! Expected an identifier, but found `{:?}`", loc, t
+                    )))
+                }
+                None => Err(Self::unexpected_eof_while("parsing data variant record fields", loc))
+            }?;
+            p.eat(&Colon2)?;
+            let tysig = p.type_signature()?;
+            Ok((name, tysig))
+        })?;
+        Ok(t)
+    }
+
+    fn data_variant_arg(&mut self) -> Result<Type, SyntaxError> {
+        let loc = self.loc();
+        use Token::*; 
+        match self.peek() {
+            Some(ParenL) => {
+                self.take_next();
+
+                if self.match_curr(&ParenR) {
+                    self.take_next();
+                    return Ok(Type::Tuple(vec![]))
+                }
+
+                let first = self.type_signature()?;
+
+                if self.match_curr(&ParenR) {
+                    self.take_next();
+                    return Ok(first)
+                }
+
+                if self.match_curr(&Comma) {
+                    let (mut items, _) = self.many_while(
+                        |t| matches!(t, &Comma), 
+                        Self::type_signature)?;
+                    items.insert(0, first);
+                    self.eat(&ParenR)?;
+                    return Ok(Type::Tuple(items))
+                }
+
+                let (args, _) = self.many_while(
+                    |t| !matches!(t, ParenR), 
+                    Self::type_signature)?;
+
+                Ok(Type::Apply(Box::new(first), args))
+            }
+            Some(Lower(_)) => {
+                let s = self.take_next().get_symbol().unwrap();
+                Ok(Type::Var(Name::Ident(s)))
+
+            }
+            Some(Upper(_)) => {
+                let s = self.take_next().get_symbol().unwrap();
+                Ok(Type::TyCon(Name::Cons(s)))
+            }
+            Some(t) => {
+                Err(SyntaxError(format!(
+                    "Invalid token found at {}! Expected a constructor, but found `{:?}`", loc, t
+                )))
+            }
+            None => Err(Self::unexpected_eof_while("parsing data variants", loc))
+        }
+    }
+
+    /// Reads a fixity keyword and precedence token to generate
+    /// a fixity to apply to following operators
+    fn fixity_spec(&mut self) -> Result<Fixity, SyntaxError> {
+        // associativity rule from keyword token
+        let assoc = self
+            .take_next()
+            .as_assoc_spec()
+            .map_err(|err| SyntaxError(format!("{}", err)))?;
+        // precedence
+        let prec = self
+            .take_next()
+            .as_u8()
+            .and_then(|p| Ok(p.into()))
+            .map_err(|err| SyntaxError(format!("{}", err)))?;
+        Ok(Fixity { assoc, prec })
+    }
+
+    fn with_fixity(&mut self, fixity: Fixity) -> Result<Vec<Operator>, SyntaxError> {
+        // let mut ops = vec![];
+        // let loc = self.loc();
+
+        self.many_while(|t| matches!(t, Token::Operator(_)), |p| {
+            let loc = p.loc();
+            let operator = p.take_next().as_operator();
+            if let Some(op) = operator {
+                if p.fixities.get(&op).is_some() {
+                    return Err(SyntaxError(format!("Fixity declaration error! The operator `{}` at {} already has a defined fixity.", op, loc)))
+                } else {
+                    p.fixities.insert(op.clone(), fixity);
+                }
+                Ok(op)
+            } else {
+                Err(Self::unexpected_eof_while(
+                    "parsing fixity spec at {}", loc))
+            }
+        }).and_then(|(ops, _)| Ok(ops))
+    }
+
+    pub fn expression(&mut self) -> Result<Expr, SyntaxError> {
         let (start, expr) = self.subexpression()?;
 
-        println!("[{}] {:?}", &start, &expr);
         if self.is_done() 
             || self.peek()
                    .and_then(|t| Some(!t.is_terminal()))
@@ -139,15 +714,16 @@ impl<'t> Parser<'t> {
             self.maybe_app(start, expr)
         }
     }
+
     fn infix_expr(&mut self) -> Result<Expr, SyntaxError> {
-        self.binary(0, &mut Self::terminal)
+        self.binary(Prec::LAST, &mut Self::terminal)
     }
 
     /// First saves the current location, and then parses an expressiob, 
     /// returning both the location and the parsed results. 
     pub fn subexpression(&mut self) -> Result<(Location, Expr), SyntaxError> {
         let loc = self.loc();
-        let expr = self.binary(0, &mut Self::terminal)?;
+        let expr = self.binary(Prec::LAST, &mut Self::terminal)?;
         Ok((loc, expr))
     }
 
@@ -191,7 +767,7 @@ impl<'t> Parser<'t> {
         } else { self.get_row() };
 
         while self.peek().and_then(|t| Some(t.is_terminal())).unwrap_or_else(|| false) && !self.is_done() && self.get_row() == row {
-            nodes.push(self.binary(0, &mut Self::terminal)?);
+            nodes.push(self.binary(Prec::LAST, &mut Self::terminal)?);
             if self.get_column() > start.col {
                 row = self.get_row()
             }
@@ -199,19 +775,22 @@ impl<'t> Parser<'t> {
         Ok(Expr::App { func: Box::new(expr), args: nodes })
     }
 
-    fn binary<F>(&mut self, min_prec: u8, f: &mut F) -> Result<Expr, SyntaxError>
+    #[inline]
+    fn peek_fixity(&mut self) -> Option<&Fixity> {
+        let op = self.peek().and_then(|token| token.as_operator());
+        if let Some(operator) = op {
+            self.fixities.get(&operator)
+        } else {
+            None
+        }
+    }
+
+    fn binary<F>(&mut self, min_prec: Prec, f: &mut F) -> Result<Expr, SyntaxError>
     where
         F: FnMut(&mut Self) -> Result<Expr, SyntaxError>,
     {
         let mut expr = f(self)?;
-        while let Some(&Fixity { assoc, prec }) = {
-            let op = self.peek().and_then(|token| token.as_operator());
-            if let Some(operator) = op {
-                self.fixities.get(&operator)
-            } else {
-                None
-            }
-        } {
+        while let Some(&Fixity { assoc, prec }) = self.peek_fixity() {
             if min_prec < prec || (min_prec == prec && assoc.is_right()) {
                 // since we know the token will contain an `Operator`, this is safe to unwrap
                 let op = self.take_next().as_operator().unwrap();
@@ -329,9 +908,9 @@ impl<'t> Parser<'t> {
                                     })))
                     }
 
-                    Some(t@Ident(_)) => Err(no_local_vars(loc, t, &binder)),
+                    Some(t@Lower(_)) => Err(no_local_vars(loc, t, &binder)),
 
-                    Some(Sym(_)) => {
+                    Some(Upper(_)) => {
                         let ctor = this.take_next();
                         let (args, _) = this.many_while(
                             |t| !matches!(t, Pipe | ParenR | Comma), 
@@ -369,13 +948,12 @@ impl<'t> Parser<'t> {
 
                     Some(Bytes(_) | Char(_) | Str(_) | Num {..}) => {
                         this.many_sep_by(Pipe, Self::case_branch_pat)
-                            .and_then(|alts| 
-                                this.eat(&ParenR)
-                                    .and_then(|_| 
-                                        Ok(Pat::Binder{ 
-                                            binder, 
-                                            pattern: Box::new(Pat::Union(alts)) 
-                                        })))
+                            .and_then(|alts| this
+                                .eat(&ParenR)
+                                .and_then(|_| Ok(Pat::Binder{ 
+                                    binder, 
+                                    pattern: Box::new(Pat::Union(alts)) 
+                                })))
                     }
 
                     Some(Token::Underscore) => this
@@ -405,7 +983,7 @@ impl<'t> Parser<'t> {
                     }))
             }
 
-            Some(t@Ident(_)) => Err(no_local_vars(loc, t, &binder)),
+            Some(t@Lower(_)) => Err(no_local_vars(loc, t, &binder)),
 
             Some(t) => Err(SyntaxError(format!(
                 "Invalid token `{1}` found at {0} while parsing \
@@ -429,7 +1007,7 @@ impl<'t> Parser<'t> {
                 .eat(&Underscore)
                 .and_then(|_| Ok(Pat::Wild)),
 
-            Some(Ident(_)) => {
+            Some(Lower(_)) => {
                 let ident = self.take_next();
                 if self.match_curr(&At) {
                     self.eat(&At)
@@ -455,7 +1033,7 @@ impl<'t> Parser<'t> {
                         self.eat(&ParenR)?;
                         Ok(Pat::Tuple(vec![]))
                     }
-                    Some(Ident(..) | Sym(..)) => {
+                    Some(Lower(..) | Upper(..)) => {
                         let ctor = self.take_next();
                         match self.peek() {
                             Some(ParenR) => {
@@ -532,7 +1110,7 @@ impl<'t> Parser<'t> {
     fn literal(&mut self, token: Token) -> Result<Expr, SyntaxError> {
         let loc = self.loc();
         match &token {
-            Token::Sym(_)
+            Token::Upper(_)
             | Token::Char(_)
             | Token::Str(_)
             | Token::Bytes(_)
@@ -584,14 +1162,14 @@ impl<'t> Parser<'t> {
             Some(Comma) => {
                 self.eat(&Comma)?;
                 self.eat(&ParenR)?;
-                Ok(Expr::Ident(Var::Ident(",".into())))
+                Ok(Expr::Ident(Name::Ident(self.intern(&*Comma.to_string()))))
             }
             Some(Operator(..)) => {
                 let loc = self.loc(); 
                 let infix = self.take_next().as_operator().unwrap();
                 if matches!(self.peek(), Some(ParenR)) {
                     self.eat(&ParenR)?;
-                    return Ok(Expr::Ident(Var::Infix(infix)))
+                    return Ok(Expr::Ident(Name::Infix(infix)))
                 };
                 // let fixity = self.fixities.get(&infix).copied();
                 if let Some(Fixity { prec, ..}) = self
@@ -655,12 +1233,22 @@ impl<'t> Parser<'t> {
     }
 
     fn record_app(&mut self, proto: Token) -> Result<Expr, SyntaxError> {
-        let fields = self.delimited(Token::CurlyL, Token::Comma, Token::CurlyR, |p| {
+        use Token::{CurlyL as L, Comma as C, CurlyR as R, Eq as E};
+        let fields = self.delimited(L, C, R, |p| {
             let left = p.take_next();
-            match p.peek() {
-                Some(Token::Comma) => Ok((left, None)),
-                _ => Ok((left, Some(p.subexpression()?.1))),
-            }
+            let right = match p.peek() {
+                Some(C) => None,
+                Some(E) => {
+                    p.take_next();
+                    let (_, rhs) = p.subexpression()?;
+                    Some(rhs)
+                }
+                _ => {
+                    let (_, rhs) = p.subexpression()?;
+                    Some(rhs)
+                },
+            };
+            Ok((left, right))
         })?;
         Ok(Expr::Record { proto, fields })
     }
@@ -686,7 +1274,7 @@ impl<'t> Parser<'t> {
     ///     (0, _) -> 0
     ///     (x, y) -> x * y
     /// ```
-    fn named_pats(&mut self,) {
+    fn named_pats(&mut self, ) {
         todo!()
     }
 
@@ -743,11 +1331,15 @@ impl<'t> Parser<'t> {
 
             Some(Token::Lambda) => self.lambda(),
 
-            Some(Token::Ident(_) | Token::Underscore) => {
-                Ok(Expr::Ident(Var::Ident(self.take_next().get_string())))
+            Some(Token::Lower(_)) => {
+                let s = self.take_next().get_symbol().unwrap();
+                Ok(Expr::Ident(Name::Ident(s)))
             }
 
-            Some(Token::Sym(..)) => Ok(Expr::Ident(Var::Cons(self.take_next().get_string()))),
+            Some(Token::Upper(_)) => {
+                let s = self.take_next().get_symbol().unwrap();
+                Ok(Expr::Ident(Name::Cons(s)))
+            },
 
             Some(Token::Char(_) | Token::Str(_) | Token::Bytes(_) | Token::Num { .. }) => {
                 self.with_next(|t, p| p.literal(t))
@@ -788,7 +1380,7 @@ impl<'t> Parser<'t> {
                     Some(Dot2) => {
                         return Ok((Dot2, Some(Pat::Rest)));
                     }
-                    Some(Ident(_) | Sym(_)) => {
+                    Some(Lower(_) | Upper(_)) => {
                         let field = p.take_next();
                         match p.peek() {
                             Some(Comma | CurlyR) => { Ok((field, None))}
@@ -815,7 +1407,7 @@ impl<'t> Parser<'t> {
                self.take_next();
                 return Ok(Pat::Tuple(Vec::new())); 
             }
-            Some(Sym(..) | Ident(..)) => {
+            Some(Upper(..) | Lower(..)) => {
                 let sym = self.take_next();
                 match self.peek() {
                     Some(ParenR) => {
@@ -875,7 +1467,7 @@ impl<'t> Parser<'t> {
         use Token::*;
         let pos = self.loc();
         match self.peek() {
-            Some(Ident(_)) => Ok(Pat::Var(self.take_next())),
+            Some(Lower(_)) => Ok(Pat::Var(self.take_next())),
 
             Some(BrackL) => {
                 let elements = self
@@ -884,7 +1476,7 @@ impl<'t> Parser<'t> {
                 Ok(Pat::List(elements))
             }
 
-            Some(Sym(..)) => {
+            Some(Upper(..)) => {
                 let ctor = self.take_next();
                 if matches!(self.peek(), Some(&CurlyL)) {
                     Ok(Pat::Record { 
@@ -944,187 +1536,14 @@ impl<'t> Parser<'t> {
     fn unexpected_eof_while(action: &str, loc: Location) -> SyntaxError {
         SyntaxError(format!("Unexpected EOF at {} while {}!", loc, action))
     }
-
-    //-------- DECLARATIONS
-
-    /// After parsing top-level module stuff, parse declarations
-    fn declaration(&mut self) -> Result<Decl, SyntaxError> {
-        let loc = self.loc(); 
-        match self.peek() {
-            Some(Token::Kw(Keyword::InfixL | Keyword::InfixR)) => {
-                let fixity = self.fixity_spec()?;
-                let infixes = self.with_fixity(fixity)?;
-                Ok(Decl::Infix { fixity, infixes })
-            }
-            Some(Token::Kw(Keyword::Data)) => {
-                self.data_decl()
-            }
-            Some(t) => {
-                Err(SyntaxError(format!(
-                    "Invalid token `{}` at {} while parsing body declarations!", t, loc
-                )))
-            }
-            None => {
-                Err(Self::unexpected_eof_while("parsing body declarations", loc))
-            }
-        }
-    }
-
-    /// Parses a data declaration.
-    /// 
-    /// A data declaration consists of
-    ///     * Data type name
-    ///     * Data type variables (~ generics)
-    ///     * Data constructors/variants
-    ///         * variants may be fieldless
-    ///         * constructor + arguments
-    fn data_decl(&mut self) -> Result<Decl, SyntaxError> {
-        self.eat(&Token::Kw(Keyword::Data))?;
-        let loc = self.loc();
-        let name = match self.peek() {
-            Some(Token::Sym(..)) => {
-                Ok(Var::Cons(self.take_next().get_string()))
-            }
-            t => {
-                Err(SyntaxError(format!(
-                    "Invalid name used for data declaration! Expected a `Sym` token, but instead found `{:?}` at {}", t, loc
-                )))
-            }
-        }?;
-        let (poly, _) = self.many_while(
-            |t| !matches!(t, Token::Eq), 
-            |p| {
-                let loc = p.loc();
-                match p.peek() {
-                    Some(Token::Ident(_)) => Ok(Var::Ident(p
-                        .take_next()
-                        .get_string())), 
-
-                    Some(t) => Err(SyntaxError(format!(
-                        "Invalid token found at {} while parsing data declaration type variables! \
-                        Expected a token of variant `Ident`, but found `{}`", loc, t))),
-                    None => Err(Self::unexpected_eof_while("parsing data declaration lhs type parameters", loc))
-                }
-            })?;
-        self.eat(&Token::Eq)?;
-        let variants = self.many_sep_by(
-            Token::Pipe, Self::data_variant)?;
-        let derives = if self.match_curr(&Token::Kw(Keyword::Derive)) {
-            self.take_next();
-            let loc = self.loc(); 
-            match self.peek() {
-                Some(Token::ParenL) => {
-                    self.delimited(
-                        Token::ParenL, Token::Comma, Token::ParenR, 
-                        |p| {
-                            let loc = p.loc();
-                            match p.peek() {
-                            Some(Token::Sym(_)) => {
-                                Ok(Var::Cons(p.take_next().get_string()))
-                            }
-                            Some(t) => {
-                                Err(SyntaxError(format!(
-                                    "Invalid token type while parsing data declaration derive clause at {}. Expected a `Sym` but found `{:?}`", 
-                                    loc, 
-                                    t
-                                )))
-                            }
-                            None => {
-                                Err(Self::unexpected_eof_while("parsing data declaration derivations", loc))
-                            }
-                        }})
-                }
-                Some(Token::Sym(_)) => {
-                    // safe to unwrap since we know `Token::Sym` successfully converts into a `Var::Cons`
-                    Ok(vec![self.take_next().try_into().unwrap()])
-                }
-                Some(t) => {
-                    Err(SyntaxError(format!(
-                        "Invalid token type while parsing data declaration derive clause at {}. Expected a `Sym` but found `{:?}`", 
-                        loc, 
-                        t
-                    )))
-                }
-                None => {
-                    Err(Self::unexpected_eof_while(
-                    "parsing data declaration derivations", 
-                    loc))
-                }
-            }
-        } else { Ok(vec![]) }?;
-        Ok(Decl::Data { name, poly, variants, derives })
-    }
-
-    fn data_variant(&mut self) -> Result<DataVariant, SyntaxError> {
-        todo!()
-        // match self.peek() {
-        //     Some(Token::Sym(_)) => {
-        //         let ctor = self.take_next().get_string();
-        //     }
-        //     _ => {}
-        // }
-    }
-
-    fn data_variant_args(&mut self) -> Result<Vec<TyPat<Var>>, SyntaxError> {
-        todo!()
-        // use Token::*; 
-        // match self.peek() {
-        //     Some(Pipe) => {}
-        //     Some(CurlyL) => {
-        //         // self.delimited(CurlyL, Comma, CurlyR, |p| )
-        //     }
-        //     Some(ParenL) => {}
-        //     Some(Ident(_)) => {
-        //         let ident = self.take_next();
-
-        //     }
-        //     Some(Sym()) => {}
-        //     _ => {}
-        // }
-    }
-
-    /// Reads a fixity keyword and precedence token to generate
-    /// a fixity to apply to following operators
-    fn fixity_spec(&mut self) -> Result<Fixity, SyntaxError> {
-        // associativity rule from keyword token
-        let assoc = self
-            .take_next()
-            .as_assoc_spec()
-            .map_err(|err| SyntaxError(format!("{}", err)))?;
-        // precedence
-        let prec = self
-            .take_next()
-            .as_u8()
-            .map_err(|err| SyntaxError(format!("{}", err)))?;
-        Ok(Fixity { assoc, prec })
-    }
-
-    fn with_fixity(&mut self, fixity: Fixity) -> Result<Vec<Operator>, SyntaxError> {
-        // let mut ops = vec![];
-        // let loc = self.loc();
-
-        self.many_while(|t| matches!(t, Token::Operator(_)), |p| {
-            let loc = p.loc();
-            let operator = p.take_next().as_operator();
-            if let Some(op) = operator {
-                if p.fixities.get(&op).is_some() {
-                    return Err(SyntaxError(format!("Fixity declaration error! The operator `{}` at {} already has a defined fixity.", op, loc)))
-                } else {
-                    p.fixities.insert(op.clone(), fixity);
-                }
-                Ok(op)
-            } else {
-                Err(Self::unexpected_eof_while(
-                    "parsing fixity spec at {}", loc))
-            }
-        }).and_then(|(ops, _)| Ok(ops))
-    }
 }
 
 mod tests {
     #![allow(unused)]
     extern crate test;
-    use crate::compiler::syntax::expr::Var;
+    use std::marker::PhantomData;
+
+    use crate::{compiler::{syntax::name::Name, lexer::Span}, prelude::span::Spanned};
 
     use super::*;
     use test::Bencher;
@@ -1147,19 +1566,20 @@ mod tests {
         let mut source = (0..lim).map(|i| format!("{} + ", i)).collect::<String>();
         source.push_str(&*(lim.to_string()));
         b.iter(|| {
-            test::black_box(Parser::new(source.as_str()).binary(0, &mut |p| {
-                Ok(Expr::Ident(Var::Ident(p.take_next().to_string())))
-            }))
+            test::black_box(Parser::new(source.as_str()).binary(0.into(), &mut Parser::expression))
         });
     }
 
     #[test]
     fn test_binary_expression() {
+        assert_eq!(Prec::LAST, Prec::from(0));
+
         let source = "a + b / c - d";
         let mut parser = Parser::new(source);
+        let syms = ["a", "b", "c", "d"].into_iter().map(|s| parser.intern(*s)).collect::<Vec<_>>();
 
-        let expr = parser.binary(0, &mut |p| {
-            Ok(Expr::Ident(Var::Ident(p.take_next().to_string())))
+        let expr = parser.binary(0.into(), &mut |p| {
+            p.expression()
         });
 
         println!("{:#?}", &expr);
@@ -1167,15 +1587,15 @@ mod tests {
             expr,
             Ok(Expr::Binary {
                 infix: BinOp::Plus.into(),
-                left: Box::new(Expr::Ident(Var::Ident("a".into()))),
+                left: Box::new(Expr::Ident(Name::Ident(syms[0]))),
                 right: Box::new(Expr::Binary {
                     infix: BinOp::Minus.into(),
                     left: Box::new(Expr::Binary {
                         infix: BinOp::Div.into(),
-                        left: Box::new(Expr::Ident(Var::Ident("b".into()))),
-                        right: Box::new(Expr::Ident(Var::Ident("c".into())))
+                        left: Box::new(Expr::Ident(Name::Ident(syms[1]))),
+                        right: Box::new(Expr::Ident(Name::Ident(syms[2])))
                     }),
-                    right: Box::new(Expr::Ident(Var::Ident("d".into())))
+                    right: Box::new(Expr::Ident(Name::Ident(syms[3])))
                 })
             })
         )
@@ -1186,11 +1606,8 @@ mod tests {
         let lim = 2780; // 1000;
         let mut source = (0..lim).map(|i| format!("{} + ", i)).collect::<String>();
         source.push_str(&*(lim.to_string()));
-
         let mut parser = Parser::new(source.as_str());
-        let _expr = parser.binary(0, &mut |p| {
-            Ok(Expr::Ident(Var::Ident(p.take_next().to_string())))
-        });
+        let _expr = parser.binary(Prec::LAST, &mut Parser::terminal);
 
         // println!("{:?}", expr)
     }
@@ -1247,30 +1664,7 @@ mod tests {
         });
     }
 
-    macro_rules! __ {
-        (:$ident:tt) => {
-            Expr::Ident(Var::Ident(stringify!($ident).into()))
-        };
-    }
-
-    #[test]
-    fn test_tuple() {
-
-        let pairs = [
-            ( "(,)", Ok(__!(:,))),
-            ("(a, b)", Ok(Expr::Tuple(vec![__!(:a), __!(:b)]))),
-            ("(a b, c)", Ok(Expr::Tuple(vec![
-                Expr::App { func: Box::new(__!(:a)), args: vec![__!(:b)] },
-                __!(:c)
-            ])))
-        ];
-        for (s, x) in pairs {
-            let expr = Parser::new(s).expression();
-            println!("{:?}", &expr);
-            assert_eq!(expr, x)
-        }
-    }
-
+   
     #[test]
     fn test_delimited() {
         use Token::{ParenL as L, Comma as C, ParenR as R};
@@ -1328,6 +1722,110 @@ mod tests {
         println!("{:?}", parser.peek());
         let expr = parser.expression();
         println!("decl\n{:#?}\nexpr\n{:#?}", decl, expr)
+    }
 
+    #[test]
+    fn test_type_syntax() {
+        let src = "(a -> b) -> [(a, b)]";
+        let mut parser = Parser::new(src);
+        let sig = parser
+            .type_signature()
+            .and_then(|ty| {
+                println!("arity: {:?}", Type::arrow_arity_in(&ty)); 
+                Ok(ty)
+            });
+
+        println!("{0:#?}\n\n{0}", &sig.unwrap());
+    }
+
+    #[test]
+    fn test_record_fields() {
+        let source = "\
+        { name :: String\
+        , age :: (Int, Int)\
+        , free :: Free (f (Free f a))\
+        , nicknamed :: String -> Bool \
+        }";
+        println!("input:");
+        println!("{}", &source);
+        let mut parser = Parser::new(source);
+        let fields = parser.data_record_fields();
+        let mut lexicon = parser.lexer.lexicon;
+        let syms = [
+            "name", "String", "age", 
+            "Int", "free", "Free", 
+            "f", "a", "nicknamed", "Bool"
+            ].into_iter().map(|t| lexicon.intern(*t)).collect::<Vec<_>>();
+
+        let expected = vec![
+            (
+                Name::Ident(syms[0]), 
+                Type::TyCon(Name::Cons(syms[1]))
+            ), 
+            (
+                Name::Ident(syms[2]),
+                Type::Tuple(vec![
+                    Type::TyCon(Name::Cons(syms[3])), 
+                    Type::TyCon(Name::Cons(syms[3]))])
+
+            ),
+            (
+                Name::Ident(syms[4]),
+                Type::Apply(Box::new(Type::TyCon(Name::Cons(syms[5]))), 
+                    vec![
+                        Type::Group(Box::new(
+                            Type::Apply(
+                                Box::new(Type::Var(Name::Ident(syms[6]))),
+                                    vec![
+                                        Type::Group(
+                                            Box::new(
+                                                Type::Apply(
+                                                    Box::new(
+                                                    
+                                                    Type::TyCon(Name::Cons(syms[5]))
+                                                    ),
+                                                    vec![
+                                                        Type::Var(Name::Ident(syms[6])),
+                                                        Type::Var(Name::Ident(syms[7]))
+                                                    ]
+                                                )
+                                            )
+                                        )
+                                    ]
+                                )
+                            )
+                        )
+                    ])
+            ),
+            (
+                Name::Ident(syms[8]),
+                Type::Arrow(Box::new(Type::TyCon(Name::Cons(syms[1]))), Box::new(Type::TyCon(Name::Cons(syms[9]))))
+            )
+        ];
+
+        assert_eq!(fields, Ok(expected))
+    }
+
+    #[test]
+    fn test_data_decl() {
+        let src = "
+        data Bool = True | False
+        
+        data Womp (Show x) => x 
+            = A { name :: x -> Bool -> Bool } 
+            | B { names :: [x] -> [Bool]}
+            deriving (Eq, Show)
+        
+        data Free f a
+            = Pure a 
+            | Free (f (Free f a))
+        ";
+        let mut parser = Parser::new(src);
+        (0..3).for_each(|_| {
+            println!("> {:?}", parser.peek());
+            let decl = parser.declaration();
+            println!("{:#?}", decl);
+            println!(">> {:?}", parser.peek());
+        });
     }
 }

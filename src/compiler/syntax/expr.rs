@@ -1,50 +1,11 @@
-use crate::compiler::lexer::TokenError;
+// extern crate pretty;
+
+use crate::prelude::pretty::punctuate;
 
 use super::{
-    literal::Literal, pattern::Pat, Newtype, Operator,
-    Token,
+    literal::Literal, name::Name, pattern::Pat, Newtype,
+    Operator, Token,
 };
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Var {
-    /// Used for identifiers
-    Ident(String),
-    /// Used for operators
-    Infix(Operator),
-    /// Used for data constructors
-    Cons(String),
-    /// Used for classes -- play same syntactic role as TyCons,
-    /// but within constraints?
-    Class(String),
-}
-
-impl std::fmt::Display for Var {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> std::fmt::Result {
-        match self {
-            Var::Ident(s)
-            | Var::Cons(s)
-            | Var::Class(s) => {
-                write!(f, "{}", s)
-            }
-            Var::Infix(x) => write!(f, "{}", x),
-        }
-    }
-}
-
-impl std::convert::TryFrom<Token> for Var {
-    type Error = TokenError;
-    fn try_from(value: Token) -> Result<Self, Self::Error> {
-        match value {
-            Token::Ident(s) => Ok(Var::Ident(s)),
-            Token::Sym(s) => Ok(Var::Cons(s)),
-            Token::Operator(o) => Ok(Var::Infix(o)),
-            t => Err(TokenError::Incompatible(format!("Failed Token -> Var conversion! Expected either `Ident`, `Sym`, or `Operator` variant, but found {:?}", t)))
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Binding {
@@ -53,9 +14,15 @@ pub struct Binding {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Generator<L, R> {
+    pub lhs: L,
+    pub rhs: R,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Expr {
     Lit(Literal),
-    Ident(Var),
+    Ident(Name),
     /// Operator section. See [`Section`] for more details.
     Section(Section),
     Tuple(Vec<Expr>),
@@ -167,6 +134,31 @@ pub enum Section {
     Right { infix: Operator, right: Box<Expr> },
 }
 
+impl Section {
+    pub fn get_infix(&self) -> &Operator {
+        match self {
+            Section::Left { infix, .. }
+            | Section::Right { infix, .. } => infix,
+        }
+    }
+}
+
+impl std::fmt::Display for Section {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Section::Left { infix, left } => {
+                write!(f, "({}{})", left, infix)
+            }
+            Section::Right { infix, right } => {
+                write!(f, "({}{})", infix, right)
+            }
+        }
+    }
+}
+
 /// Trivial implementation since `Expr::Section` is a tuple variant with a single `Section` field
 impl From<Section> for Expr {
     fn from(section: Section) -> Self {
@@ -214,3 +206,53 @@ impl From<(Section, Expr)> for Expr {
         }
     }
 }
+
+impl std::fmt::Display for Expr {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Expr::Lit(l) => write!(f, "{}", l),
+            Expr::Ident(x) => write!(f, "{}", x),
+            Expr::Section(s) => write!(f, "{}", s),
+            Expr::Tuple(xs) => {
+                write!(f, "(")?;
+                punctuate(',', xs, f)?;
+                write!(f, ")")
+            }
+            Expr::Array(xs) => {
+                write!(f, "[")?;
+                punctuate(',', xs, f)?;
+                write!(f, "]")
+            }
+            Expr::List { expr, bind, pred } => {
+                todo!();
+                write!(f, "[ ")?;
+                write!(f, "{} |", expr)?;
+                if !bind.is_empty() {
+                    // punctuate(",", bind, f)?;
+                }
+                if !pred.is_empty() {
+                    punctuate(",", pred, f)?;
+                }
+                write!(f, " ]")
+            }
+            Expr::Lam { arg, body } => todo!(),
+            Expr::Lambda { args, body } => todo!(),
+            Expr::App { func, args } => {
+                write!(f, "(")?;
+                punctuate("", args, f)?;
+                write!(f, ")")
+            }
+            Expr::Unary { prefix, right } => todo!(),
+            Expr::Binary { infix, left, right } => todo!(),
+            Expr::Case { expr, arms } => todo!(),
+            Expr::Cond { cond, then, other } => todo!(),
+            Expr::Let { bind, body } => todo!(),
+            Expr::Record { proto, fields } => todo!(),
+        }
+    }
+}
+
+// fn print_expr(indent: usize, expr: &Expr) {}

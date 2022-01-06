@@ -1,17 +1,12 @@
 use crate::prelude::either::Either;
 
-use super::{
-    expr::{Expr, Var},
-    fixity::Fixity,
-    literal::Literal,
-    pattern::{Constraint, Morpheme, Pat, SigPat},
-    Operator, Token,
-};
+use super::expr::Expr;
+use super::fixity::Fixity;
+use super::name::Name;
+use super::pattern::{Constraint, Pat, SigPat};
+use super::Operator;
 
 /*
-
-
-
 
 infix'l n + - |>
 infix'r n ^^ ** <|
@@ -26,7 +21,7 @@ class Thing x where
 
 
 uncurry f x y = \(x, y) -> f x y
-              = |x y| f x y         <- syntactic sugar?
+
 
 
 */
@@ -38,46 +33,53 @@ pub enum Decl {
         infixes: Vec<Operator>,
     },
     Data {
-        name: Var,
-        constraints: Vec<Constraint<Var>>,
-        poly: Vec<Var>,
+        name: Name,
+        constraints: Vec<Constraint<Name>>,
+        poly: Vec<Name>,
         variants: Vec<DataVariant>,
-        derives: Vec<Var>,
+        derives: Vec<Name>,
     },
-    // `
+    // A where node
     Where {
-        pat: Pat,
-        body: Vec<Expr>,
-        decls: Vec<Decl>,
+        left: Box<Self>,
+        right: Box<Self>,
     },
     Function {
-        name: Var,
-        defs: Vec<Clause>,
+        name: Name,
+        /// Each definition corresponds to an equation wherein
+        defs: Vec<Clause<Pat, Expr, Decl>>,
     },
+}
+
+pub enum Where {
+    Class {},
+    Function {},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Stmt {
     /// Bind an expression to a pattern. `p <- x`
-    Bind { pat: Pat, expr: Expr },
+    Bind {},
 }
 
 /// `[`:pats`]` = `:body` where `:decls`
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Clause {
-    pub pats: Vec<Pat>,
-    pub body: Vec<Expr>,
-    pub decls: Vec<Decl>,
+pub struct Clause<P, E, D> {
+    /// The tail of the left-hand side of an equation, i.e., all terms
+    /// to the left of the `=` sign **except** the first.
+    pub pats: Vec<P>,
+    pub body: Vec<E>,
+    pub decls: Vec<D>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DataVariant {
-    pub ctor: Var,
+    pub ctor: Name,
     pub args: Either<DataPat, ()>,
 }
 
-pub type FieldPat = (Var, Type);
-pub type Type = SigPat<Var>;
+pub type FieldPat = (Name, Type);
+pub type Type = SigPat<Name>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DataPat {

@@ -18,7 +18,7 @@ use crate::{
                 Binding, Expr, Match, Section
             }, 
             decl::{
-                Decl, DataVariant, Type, DataPat, TyParam
+                Decl, DataVariant, Type, DataPat, TyParam, Clause
             },
             pattern::{Pat, Constraint}, 
             literal::Literal, 
@@ -35,13 +35,7 @@ pub use super::{
     Comment,
 };
 
-impl<'t> Intern for Parser<'t> {
-    type Key = Symbol;
-    type Value = str;
-    fn intern(&mut self, value: &Self::Value) -> Self::Key {
-        self.lexer.intern_str(value)
-    }
-}
+type Parsed<T> = Result<T, SyntaxError>;
 
 #[derive(Debug)]
 pub struct Parser<'t> {
@@ -53,6 +47,14 @@ pub struct Parser<'t> {
 impl<'t> From<&'t str> for Parser<'t> {
     fn from(s: &'t str) -> Self {
         Parser::new(s)
+    }
+}
+
+impl<'t> Intern for Parser<'t> {
+    type Key = Symbol;
+    type Value = str;
+    fn intern(&mut self, value: &Self::Value) -> Self::Key {
+        self.lexer.intern_str(value)
     }
 }
 
@@ -182,7 +184,7 @@ impl<'t> Parser<'t> {
     /// * Class declaration
     /// * Function declaration
     /// * Type signature (?)
-    fn declaration(&mut self) -> Result<Decl, SyntaxError> {
+    fn declaration(&mut self) -> Parsed<Decl> {
         let loc = self.loc();
         match self.peek() {
             Some(Token::Kw(Keyword::InfixL | Keyword::InfixR)) => {
@@ -192,6 +194,13 @@ impl<'t> Parser<'t> {
             }
             Some(Token::Kw(Keyword::Data)) => {
                 self.data_decl()
+            }
+            Some(Token::Kw(Keyword::Type)) => {
+                self.alias_decl()
+            }
+            Some(Token::Lower(..)) => {
+                let name = self.take_next();
+                self.definition(name)
             }
             Some(_) => {
                 let sym = self.peek().and_then(|t| t.get_symbol());
@@ -208,6 +217,98 @@ impl<'t> Parser<'t> {
                 Err(Self::unexpected_eof_while("parsing body declarations", loc))
             }
         }
+    }
+
+    /// When encountering a lowercase identifier as the first element in 
+    /// a top-level declaration, it may either be a *type annotation*, 
+    /// or a *function declaration*. 
+    pub fn definition(&mut self, name: Token) -> Parsed<Decl> {
+        match self.peek() {
+            Some(Token::Colon2) => {
+                self.annotation(name)
+            }
+            Some(t) if t.begins_pat() => {
+                // let t = self.function_defn(name)?;
+                // let hweres = if self.match_curr(&Token::Kw(Keyword::Where)) {
+                //     self.where_clauses()?
+                // } else { vec![] };
+                // let first_clause = Clause { pats: t.0, body: t.1, decls: hweres  };
+                // let mut clauses = vec![first_clause];
+                let loc = self.loc();
+                let mut defs = vec![]; 
+                loop {
+                    if self.is_done() { break; }
+
+                    let (pats, body) = self.function_defn()?;
+
+                    let decls = if self.match_curr(&Token::Kw(Keyword::Where)) {
+                        self.where_clauses()?
+                    } else { 
+                        vec![] 
+                    };
+
+                    defs.push(Clause { pats, body, decls });
+
+                    if !self.match_curr(&name) { 
+                        break; 
+                    } else {
+                        self.take_next(); 
+                    }
+                }
+                let name = Name::Ident(name.get_symbol().unwrap());
+                Ok(Decl::Function {
+                    name, defs 
+                })
+
+            }
+            _ => {
+                todo!()
+            }
+        }
+    }
+
+    /// 
+    pub fn annotation(&mut self, name: Token) -> Parsed<Decl> {
+        let name = Name::Ident(name.get_symbol().unwrap());
+        self.eat(&Token::Colon2)?;
+        let tipo = self.type_signature()?;
+        Ok(Decl::Annotation { name, tipo })
+    }
+
+    pub fn where_clauses(&mut self) -> Parsed<Vec<Decl>> { 
+        let loc = self.loc(); 
+        self.eat(&Token::Kw(Keyword::Where))?;
+        
+        let decls = if self.match_curr(&Token::CurlyL) {
+            self.delimited(Token::CurlyL, Token::Comma, Token::CurlyR, Self::declaration)?
+        } else {
+            let mut decls = vec![]; 
+            loop {
+                if self.is_done() { break; }
+                if self.get_column() <= loc.col { break; }
+                decls.push(self.declaration()?);
+            }
+            decls
+        };
+        Ok(decls)
+     }
+
+    pub fn function_defn(&mut self) -> Parsed<(Vec<Pat>, Expr)> {
+        let loc = self.loc(); 
+
+        let mut pats = vec![];
+        
+        loop {
+            if matches!(self.peek(), Some(Token::Eq)) {
+                break;
+            }
+            pats.push(self.case_branch_pat()?);
+        }
+
+        self.eat(&Token::Eq)?;
+
+        let expr = self.expression()?;
+        Ok((pats, expr))
     }
 
     /// Type-level syntax: basically patterns with only type constructors, type 
@@ -235,7 +336,7 @@ impl<'t> Parser<'t> {
     ///       patterns, e.g., `a b c d`. 
     /// 
     /// 
-    fn type_signature(&mut self) -> Result<Type, SyntaxError> {
+    fn type_signature(&mut self) -> Parsed<Type> {
         self.maybe_arrow_sep(|p| {
             // let first = p.type_atom()?;
             p.within_offside(
@@ -249,9 +350,9 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn maybe_arrow_sep<F>(&mut self, mut f: F) -> Result<Type, SyntaxError> 
+    fn maybe_arrow_sep<F>(&mut self, mut f: F) -> Parsed<Type> 
     where
-        F: FnMut(&mut Self) -> Result<Type, SyntaxError> 
+        F: FnMut(&mut Self) -> Parsed<Type> 
     {
         let start = self.loc();
         let mut left = f(self)?;
@@ -283,7 +384,7 @@ impl<'t> Parser<'t> {
         Ok(left)
     }
 
-    fn grouped_types(&mut self) -> Result<Type, SyntaxError> {
+    fn grouped_types(&mut self) -> Parsed<Type> {
         use Token::*;
         self.eat(&ParenL)?;
         if self.match_curr(&ParenR) {
@@ -312,7 +413,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Helper for `type_sig`
-    fn type_atom(&mut self) -> Result<Type, SyntaxError> {
+    fn type_atom(&mut self) -> Parsed<Type> {
         let loc = self.loc();
         use Token::*; 
         match self.peek() {
@@ -340,6 +441,27 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn alias_decl(&mut self) -> Parsed<Decl> {
+        self.eat(&Token::Kw(Keyword::Type))?;
+        let loc = self.loc();
+        let name = match self.peek() {
+            Some(Token::Upper(_)) => {
+                let sym = self.take_next().get_symbol().unwrap();
+                Ok(Name::Cons(sym))
+            }
+            t => {
+                Err(SyntaxError(format!(
+                    "Invalid type alias! Expected an uppercase token, but instead found `{:?}` at {}", t, loc
+                )))
+            }
+        }?;
+        let poly = self.data_ty_vars()?;
+        self.eat(&Token::Eq)?;
+        let rhs = self.type_signature()?;
+        Ok(Decl::Alias { name, poly, rhs })
+    }
+
+
      /// Parses a data declaration.
     /// 
     /// A data declaration consists of
@@ -348,7 +470,7 @@ impl<'t> Parser<'t> {
     ///     * Data constructors/variants
     ///         * variants may be fieldless
     ///         * constructor + arguments
-    fn data_decl(&mut self) -> Result<Decl, SyntaxError> {
+    fn data_decl(&mut self) -> Parsed<Decl> {
         self.eat(&Token::Kw(Keyword::Data))?;
         let loc = self.loc();
         let name = match self.peek() {
@@ -393,7 +515,7 @@ impl<'t> Parser<'t> {
         self.maybe_derive_clause(name, constraints, poly, variants)
     }
 
-    fn expect_var_ident(&mut self) -> Result<Name, SyntaxError> {
+    fn expect_var_ident(&mut self) -> Parsed<Name> {
         let loc = self.loc();
         if !self.is_done() {
             match self.peek() {
@@ -414,7 +536,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn ty_constraints(&mut self) -> Result<Vec<Constraint<Name>>, SyntaxError> {
+    fn ty_constraints(&mut self) -> Parsed<Vec<Constraint<Name>>> {
         let constraints = self.delimited(Token::ParenL, Token::Comma, Token::ParenR, 
                 |parser| {
                     let loc = parser.loc();
@@ -485,7 +607,13 @@ impl<'t> Parser<'t> {
         Ok(poly)
     }
 
-    fn maybe_derive_clause(&mut self, name: Name, constraints: Vec<Constraint<Name>>, poly: Vec<Name>, variants: Vec<DataVariant>) -> Result<Decl, SyntaxError> {
+    fn maybe_derive_clause(
+        &mut self, 
+        name: Name, 
+        constraints: Vec<Constraint<Name>>, 
+        poly: Vec<Name>, 
+        variants: Vec<DataVariant>
+    ) -> Parsed<Decl> {
         let derives = if !self.match_curr(&Token::Kw(Keyword::Derive)) {
             Ok(vec![])
         } else {
@@ -533,10 +661,10 @@ impl<'t> Parser<'t> {
             }
         }?;
 
-        Ok(Decl::Data { name, constraints, poly, variants, derives})
+        Ok(Decl::Data { name, constraints, poly, variants, derives })
     }
 
-    fn data_variant(&mut self) -> Result<DataVariant, SyntaxError> {
+    fn data_variant(&mut self) -> Parsed<DataVariant> {
         let loc = self.loc();
         match self.peek() {
             Some(Token::Upper(_)) => {
@@ -587,7 +715,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn data_record_fields(&mut self) -> Result<Vec<(Name, Type)>, SyntaxError> {
+    fn data_record_fields(&mut self) -> Parsed<Vec<(Name, Type)>> {
         use Token::*;
         let loc = self.loc();
         let t = self.delimited(CurlyL, Comma, CurlyR, 
@@ -610,7 +738,7 @@ impl<'t> Parser<'t> {
         Ok(t)
     }
 
-    fn data_variant_arg(&mut self) -> Result<Type, SyntaxError> {
+    fn data_variant_arg(&mut self) -> Parsed<Type> {
         let loc = self.loc();
         use Token::*; 
         match self.peek() {
@@ -664,7 +792,8 @@ impl<'t> Parser<'t> {
 
     /// Reads a fixity keyword and precedence token to generate
     /// a fixity to apply to following operators
-    fn fixity_spec(&mut self) -> Result<Fixity, SyntaxError> {
+    #[inline]
+    fn fixity_spec(&mut self) -> Parsed<Fixity> {
         // associativity rule from keyword token
         let assoc = self
             .take_next()
@@ -679,11 +808,10 @@ impl<'t> Parser<'t> {
         Ok(Fixity { assoc, prec })
     }
 
-    fn with_fixity(&mut self, fixity: Fixity) -> Result<Vec<Operator>, SyntaxError> {
-        // let mut ops = vec![];
-        // let loc = self.loc();
-
-        self.many_while(|t| matches!(t, Token::Operator(_)), |p| {
+    fn with_fixity(&mut self, fixity: Fixity) -> Parsed<Vec<Operator>> {
+        self.many_while(
+            |t| matches!(t, Token::Operator(_)), 
+        |p| {
             let loc = p.loc();
             let operator = p.take_next().as_operator();
             if let Some(op) = operator {
@@ -700,7 +828,7 @@ impl<'t> Parser<'t> {
         }).and_then(|(ops, _)| Ok(ops))
     }
 
-    pub fn expression(&mut self) -> Result<Expr, SyntaxError> {
+    pub fn expression(&mut self) -> Parsed<Expr> {
         let (start, expr) = self.subexpression()?;
 
         if self.is_done() 
@@ -715,50 +843,15 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn infix_expr(&mut self) -> Result<Expr, SyntaxError> {
-        self.binary(Prec::LAST, &mut Self::terminal)
-    }
-
     /// First saves the current location, and then parses an expressiob, 
     /// returning both the location and the parsed results. 
-    pub fn subexpression(&mut self) -> Result<(Location, Expr), SyntaxError> {
+    pub fn subexpression(&mut self) -> Parsed<(Location, Expr)> {
         let loc = self.loc();
         let expr = self.binary(Prec::LAST, &mut Self::terminal)?;
         Ok((loc, expr))
     }
 
-    /// Given an expression, continues parsing any legal upper-right diagonally
-    /// inclusive expressions as arguments to an application expression.
-    /// 
-    /// Legal upper-right diagonal inclusivity for expressions is demonsteated
-    /// below.
-    /// 
-    /// ```rustignore
-    /// Let r - row, c - col
-    /// given an expression X with coordinates (r_x, c_x), its arguments
-    /// is the maximal set of expressions Y with coordinates (r_y, c_y) such
-    /// that if for all y in Y
-    ///     r_x == r_y              <- notice this is a single binary expr
-    ///     c_x < c_y               <- binary exprs are infix apps
-    ///     r_x < r_y && c_x < x_y
-    ///      
-    /// Suppose we have `f x y`. 
-    /// We see that the first subexpr is `f` which has coordinates
-    ///     (r_x, c_x) = (1, 0)
-    /// the second is `x`, with coordinates 
-    ///     (r_y1, c_y1) = (1, 2)
-    /// the third is `y`, with coordinates
-    ///     (r,_y2, c_y2) = (1, 4)
-    /// Since r_x == r_yi for all r_yi's, this expression trivially forms an 
-    /// application App { func: `f`, args: [`x`, `y`]}
-    /// 
-    /// Now consider an expression with nested expressions.
-    ///     `f h
-    ///         g (j k x)`
-    /// The coordinates of each expressions (1, 0), (1, 2), (2, 3), (2, 5)
-    /// 
-    /// ```
-    fn maybe_app(&mut self, start: Location, expr: Expr) -> Result<Expr, SyntaxError> {
+    fn maybe_app(&mut self, start: Location, expr: Expr) -> Parsed<Expr> {
         let mut nodes = vec![];
 
         let mut row = if self.get_row() == start.row 
@@ -766,8 +859,14 @@ impl<'t> Parser<'t> {
             start.row 
         } else { self.get_row() };
 
-        while self.peek().and_then(|t| Some(t.is_terminal())).unwrap_or_else(|| false) && !self.is_done() && self.get_row() == row {
-            nodes.push(self.binary(Prec::LAST, &mut Self::terminal)?);
+        while !self.is_done() 
+            && self.get_row() == row 
+            && self.peek()
+                .and_then(|t| Some(t.is_terminal()))
+                .unwrap_or_else(|| false) {
+            let arg = self.binary(Prec::LAST, &mut Self::terminal)?;
+            nodes.push(arg);
+
             if self.get_column() > start.col {
                 row = self.get_row()
             }
@@ -777,7 +876,9 @@ impl<'t> Parser<'t> {
 
     #[inline]
     fn peek_fixity(&mut self) -> Option<&Fixity> {
-        let op = self.peek().and_then(|token| token.as_operator());
+        let op = self.peek()
+            .and_then(|token| token.as_operator());
+
         if let Some(operator) = op {
             self.fixities.get(&operator)
         } else {
@@ -785,22 +886,34 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn binary<F>(&mut self, min_prec: Prec, f: &mut F) -> Result<Expr, SyntaxError>
+    fn binary<F>(&mut self, min_prec: Prec, f: &mut F) -> Parsed<Expr>
     where
-        F: FnMut(&mut Self) -> Result<Expr, SyntaxError>,
+        F: FnMut(&mut Self) -> Parsed<Expr>,
     {
-        let mut expr = f(self)?;
+        let mut left = f(self)?;
+
         while let Some(&Fixity { assoc, prec }) = self.peek_fixity() {
-            if min_prec < prec || (min_prec == prec && assoc.is_right()) {
-                // since we know the token will contain an `Operator`, this is safe to unwrap
-                let op = self.take_next().as_operator().unwrap();
+            if min_prec < prec 
+                || (min_prec == prec && assoc.is_right()) {
+                // since we know the token will contain an `Operator`, 
+                // this is safe to unwrap
+                let infix = self
+                    .take_next()
+                    .as_operator()
+                    .unwrap();
+
                 if self.is_done() {
-                    return Ok(Expr::Section(Section::Left { infix: op, left: Box::new(expr) }))
+                    return Ok(Expr::Section(Section::Left { 
+                        infix, 
+                        left: Box::new(left) 
+                    }))
                 };
+
                 let right = self.binary(prec, f)?;
-                expr = Expr::Binary {
-                    infix: op,
-                    left: Box::new(expr),
+
+                left = Expr::Binary {
+                    infix,
+                    left: Box::new(left),
                     right: Box::new(right),
                 };
             } else {
@@ -808,10 +921,10 @@ impl<'t> Parser<'t> {
             }
         }
 
-        Ok(expr)
+        Ok(left)
     }
 
-    fn unary(&mut self) -> Result<Expr, SyntaxError> {
+    fn unary(&mut self) -> Parsed<Expr> {
         if let Some(Token::Operator(Operator::Reserved(BinOp::Minus))) = self.peek() {
             let prefix = self.take_next().as_operator().unwrap();
             let right = Box::new(self.unary()?);
@@ -821,56 +934,62 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn case_expr(&mut self) -> Result<Expr, SyntaxError> {
-        let expr = Box::new(
-            self.eat(&Token::Kw(Keyword::Case))
-                .and_then(Self::subexpression)?.1,
-        );
+    fn case_expr(&mut self) -> Parsed<Expr> {
+        let expr = self
+            .eat(&Token::Kw(Keyword::Case))
+            .and_then(Self::subexpression)
+            .and_then(|(_, expr)| Ok(Box::new(expr)))?;
+
         self.eat(&Token::Kw(Keyword::Of))?;
+
         let arms = match self.peek() {
             Some(Token::CurlyL) => self.delimited(
                 Token::CurlyL,
                 Token::Semi,
                 Token::CurlyR,
-                Self::case_arms,
-            )?,
-            _ => self.many_col_aligned(Self::case_arms)?,
-        };
+                Self::case_arms),
+
+            _ => self.many_col_aligned(Self::case_arms),
+        }?;
+
         Ok(Expr::Case { expr, arms })
     }
 
     fn case_arms(&mut self) -> Result<(Match, Expr), SyntaxError> {
         let pattern = self.case_branch_pat()?;
+
         let bound = matches!(&pattern, Pat::Binder { .. });
+
         let alts = if let Some(Token::Pipe) = self.peek() {
-            self.eat(&Token::Pipe)
-                .and_then(|p| p.many_sep_by(Token::Pipe, Self::case_branch_pat))?
+            self.eat(&Token::Pipe)?;
+            self.many_sep_by(Token::Pipe, Self::case_branch_pat)?
         } else {
             vec![]
         };
+
         let guard = if let Some(Token::Kw(Keyword::If)) = self.peek() {
-            Some(
-                self.eat(&Token::Kw(Keyword::If))
-                    .and_then(|p| p.subexpression())?.1,
-            )
+            self.eat(&Token::Kw(Keyword::If))?;
+            let (_, sub) = self.subexpression()?;
+            Some(sub)
         } else {
             None
         };
+
         self.eat(&Token::ArrowR)?;
-        let body = self.subexpression()?.1;
-        Ok((
-            Match {
-                pattern,
-                bound,
-                alts,
-                guard,
-            },
-            body,
-        ))
+        let (_, body) = self.subexpression()?;
+
+        let mach = Match {
+            pattern,
+            bound,
+            alts,
+            guard,
+        };
+
+        Ok((mach, body))
     }
 
     // TODO: Optimize `Binder` variant
-    fn case_pat_at(&mut self, binder: Token) -> Result<Pat, SyntaxError> {
+    fn case_pat_at(&mut self, binder: Token) -> Parsed<Pat> {
         use Token::*;
         let loc = &self.loc();
 
@@ -999,7 +1118,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn case_branch_pat(&mut self) -> Result<Pat, SyntaxError> {
+    fn case_branch_pat(&mut self) -> Parsed<Pat> {
         use Token::*;
         let loc = self.loc();
         match self.peek() {
@@ -1091,7 +1210,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn conditional_expr(&mut self) -> Result<Expr, SyntaxError> {
+    fn conditional_expr(&mut self) -> Parsed<Expr> {
         self.eat(&Token::Kw(Keyword::If))?;
         let (_, cond) = self.subexpression()?;
         self.eat(&Token::Kw(Keyword::Then))?;
@@ -1107,7 +1226,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Called when already on a literal token
-    fn literal(&mut self, token: Token) -> Result<Expr, SyntaxError> {
+    fn literal(&mut self, token: Token) -> Parsed<Expr> {
         let loc = self.loc();
         match &token {
             Token::Upper(_)
@@ -1151,7 +1270,7 @@ impl<'t> Parser<'t> {
     ///
     ///
     /// *Note:* For `(` EXPR `)`, the future linter should flag this as redundant
-    fn parentheses(&mut self) -> Result<Expr, SyntaxError> {
+    fn parentheses(&mut self) -> Parsed<Expr> {
         use Token::{ParenR, ParenL, Comma, Operator}; 
         self.eat(&ParenL)?;
         match self.peek() {
@@ -1232,7 +1351,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn record_app(&mut self, proto: Token) -> Result<Expr, SyntaxError> {
+    fn record_app(&mut self, proto: Token) -> Parsed<Expr> {
         use Token::{CurlyL as L, Comma as C, CurlyR as R, Eq as E};
         let fields = self.delimited(L, C, R, |p| {
             let left = p.take_next();
@@ -1253,32 +1372,7 @@ impl<'t> Parser<'t> {
         Ok(Expr::Record { proto, fields })
     }
 
-    /// Named application declarations are syntactic sugar for
-    /// case expressions in a (function) declaration.
-    /// 
-    /// Declarations must be grouped together such that the first 
-    /// declaration defines the base case, and subsequent declarations
-    /// form unique case branches which are matched against in order. 
-    /// The last declaration marks the end of the match alternatives.
-    /// 
-    /// ```xg
-    /// mult x 0 = 0
-    /// mult 0 x = 0
-    /// mult x y = x * y
-    /// ```
-    /// 
-    /// Is equivalent to
-    /// ```xg
-    /// fn |mult| \x y -> case (x, y) of 
-    ///     (_, 0) -> 0
-    ///     (0, _) -> 0
-    ///     (x, y) -> x * y
-    /// ```
-    fn named_pats(&mut self, ) {
-        todo!()
-    }
-
-    fn let_expr(&mut self) -> Result<Expr, SyntaxError> {
+    fn let_expr(&mut self) -> Parsed<Expr> {
         self.eat(&Token::Kw(Keyword::Let))?;
         let mut bind = vec![];
         while !self.is_done() && !self.match_curr(&Token::Kw(Keyword::In)) {
@@ -1293,11 +1387,11 @@ impl<'t> Parser<'t> {
         Ok(Expr::Let { bind, body })
     }
 
-    fn brackets(&mut self) -> Result<Expr, SyntaxError> {
+    fn brackets(&mut self) -> Parsed<Expr> {
         todo!()
     }
 
-    fn terminal(&mut self) -> Result<Expr, SyntaxError> {
+    fn terminal(&mut self) -> Parsed<Expr> {
         let loc = self.loc();
         let invalid = |t: &Token, l: &Location| {
             SyntaxError(format!(
@@ -1370,8 +1464,8 @@ impl<'t> Parser<'t> {
     /// braces) according to the given closure that returns a `Pat`, where that 
     /// closure's strictness varies based on constraints and parsing context 
     /// (namely, lambda vs let vs case).
-    fn record_field_pats<F>(&mut self, mut f: F) -> Result<Vec<(Token, Option<Pat>)>, SyntaxError> 
-    where F: FnMut(&mut Self) -> Result<Pat, SyntaxError> {
+    fn record_field_pats<F>(&mut self, mut f: F) -> Parsed<Vec<(Token, Option<Pat>)>> 
+    where F: FnMut(&mut Self) -> Parsed<Pat> {
         use Token::*; 
         self.delimited(CurlyL, Comma, CurlyR, 
             |p| {
@@ -1399,7 +1493,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Parses a lambda argument pattern beginning with `(`.
-    fn grouped_lambda_arg(&mut self) -> Result<Pat, SyntaxError> {
+    fn grouped_lambda_arg(&mut self) -> Parsed<Pat> {
         use Token::*; 
         self.eat(&ParenL)?;
         match self.peek() {
@@ -1463,7 +1557,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Parses patterns used as lambda argument(s)
-    fn lambda_arg(&mut self) -> Result<Pat, SyntaxError> {
+    fn lambda_arg(&mut self) -> Parsed<Pat> {
         use Token::*;
         let pos = self.loc();
         match self.peek() {
@@ -1513,7 +1607,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn lambda(&mut self) -> Result<Expr, SyntaxError> {
+    fn lambda(&mut self) -> Parsed<Expr> {
         use Token::{ArrowR, Lambda};
         use Expr::Lam;
 
@@ -1548,7 +1642,7 @@ mod tests {
     use super::*;
     use test::Bencher;
 
-    fn echo_expr(s: &str) -> Result<Expr, SyntaxError> {
+    fn echo_expr(s: &str) -> Parsed<Expr> {
         println!("source:\n{}", s);
         Parser::new(s).expression().and_then(|expr| {
             println!("Successfully parsed:\n{:#?}", &expr);
@@ -1827,5 +1921,37 @@ mod tests {
             println!("{:#?}", decl);
             println!(">> {:?}", parser.peek());
         });
+    }
+
+    #[test]
+    fn test_alias_decl() {
+       let src = "
+       type Name = String 
+
+       type Map k v = [(k, v)]
+       
+       type Shape x = Dot [(x, Bool) -> Bool]
+        ";
+        let mut parser = Parser::new(src);
+        (0..3).for_each(|_| {
+            println!("> {:?}", parser.peek());
+            let decl = parser.declaration();
+            println!("{:#?}", decl);
+            println!(">> {:?}", parser.peek());
+        }); 
+    }
+
+    #[test]
+    fn print_fn_decl() {
+        let src = "
+        mul 0 _ = 0
+        mul _ 0 = 0
+        mul x y = x * y 
+        ";
+        let mut parser = Parser::new(src);
+        // while !parser.is_done() {
+            let decl = parser.declaration(); 
+            println!("{:#?}", decl);
+        // }
     }
 }

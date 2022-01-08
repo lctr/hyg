@@ -39,22 +39,33 @@ pub enum Decl {
         variants: Vec<DataVariant>,
         derives: Vec<Name>,
     },
-    // A where node
-    Where {
-        left: Box<Self>,
-        right: Box<Self>,
+    /// Type alias. E.g., `type A b = C [b]`
+    Alias {
+        name: Name,
+        poly: Vec<Name>,
+        rhs: Type,
+    },
+    Class {
+        name: Name,
+        constraints: Vec<Constraint<Name>>,
+        defs: Vec<Clause<Pat, Expr, Decl>>,
     },
     Function {
         name: Name,
         /// Each definition corresponds to an equation wherein
         defs: Vec<Clause<Pat, Expr, Decl>>,
     },
+    Annotation {
+        name: Name,
+        tipo: Type,
+    },
+    Instance {
+        who: Type,
+        constraints: Vec<Constraint<Name>>,
+        defs: Vec<Clause<Pat, Expr, Decl>>,
+    },
 }
 
-pub enum Where {
-    Class {},
-    Function {},
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Stmt {
@@ -68,7 +79,7 @@ pub struct Clause<P, E, D> {
     /// The tail of the left-hand side of an equation, i.e., all terms
     /// to the left of the `=` sign **except** the first.
     pub pats: Vec<P>,
-    pub body: Vec<E>,
+    pub body: E,
     pub decls: Vec<D>,
 }
 

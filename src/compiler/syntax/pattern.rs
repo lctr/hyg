@@ -15,10 +15,11 @@ impl From<Literal> for Pat {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Constraint<T>(pub(crate) T, pub(crate) T);
+pub struct Constraint<S, T>(pub(crate) S, pub(crate) T);
 
-impl<T> std::hash::Hash for Constraint<T>
+impl<S, T> std::hash::Hash for Constraint<S, T>
 where
+    S: std::hash::Hash,
     T: std::hash::Hash,
 {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -27,7 +28,7 @@ where
     }
 }
 
-impl<T> std::fmt::Display for Constraint<T>
+impl<T> std::fmt::Display for Constraint<T, T>
 where
     T: std::fmt::Display,
 {
@@ -69,7 +70,7 @@ pub enum SigPat<T> {
     /// but anonymous type? Perhaps for internal use
     Anon,
     /// Constraint or type context
-    Given(Constraint<T>),
+    Given(Constraint<T, T>),
 }
 
 impl<T> SigPat<T> {
@@ -379,14 +380,14 @@ impl std::convert::TryFrom<Type> for Token {
     fn try_from(
         value: SigPat<Name>,
     ) -> Result<Self, Self::Error> {
-        let err = Result::<Self, Self::Error>::Err("Unable to convert `SigPat` into a single token!");
+        let err = Result::<Self, Self::Error>::Err("Unable to convert `Type := SigPat<Name>` into a single token!");
         match value {
             SigPat::Var(Name::Ident(t))
             | SigPat::TyCon(Name::Ident(t)) => {
                 Ok(Token::Lower(t))
             }
-            SigPat::Var(Name::Cons(t))
-            | SigPat::TyCon(Name::Cons(t)) => {
+            SigPat::Var(Name::Data(t))
+            | SigPat::TyCon(Name::Data(t)) => {
                 Ok(Token::Upper(t))
             }
             SigPat::Group(t) => match *t {
@@ -395,8 +396,8 @@ impl std::convert::TryFrom<Type> for Token {
                 | SigPat::TyCon(Name::Ident(t)) => {
                     Ok(Token::Lower(t))
                 }
-                SigPat::Var(Name::Cons(t))
-                | SigPat::TyCon(Name::Cons(t)) => {
+                SigPat::Var(Name::Data(t))
+                | SigPat::TyCon(Name::Data(t)) => {
                     Ok(Token::Upper(t))
                 }
                 SigPat::Anon => Ok(Token::Underscore),

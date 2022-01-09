@@ -14,11 +14,12 @@ pub struct Source<'s> {
 }
 
 impl<'s> Source<'s> {
-    /// Reset row += 1
+    /// Line feed: Reset row += 1
     const LF: char = '\n';
-    /// Treated as two spaces
+    /// Tab character: Treated as two spaces
+    #[allow(unused)]
     const TAB: char = '\t';
-    /// Ignored; NO-OP
+    /// Carriage-return: Ignored; NO-OP
     const CR: char = '\r';
 
     pub fn new(src: &'s str) -> Self {
@@ -34,18 +35,16 @@ impl<'s> Source<'s> {
         match c {
             Self::LF => self.loc.incr_row(),
             Self::TAB => {
-                for i in 0..2 {
-                    self.loc.incr_row();
+                // tabs are treated as 2 spaces
+                // NOTE: maybe this isn't the best place for this, since we may
+                // not want to modify how our position changes outside of lexer?
+                for _ in 0..2 {
+                    self.loc.incr_column();
                 }
             }
             Self::CR => {}
             _ => self.loc.incr_column(),
         }
-        // if c == Self::LF {
-        //     self.loc.reset_row()
-        // } else {
-        //     self.loc.reset_column()
-        // }
     }
 }
 

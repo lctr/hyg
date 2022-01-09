@@ -1,10 +1,14 @@
 // extern crate pretty;
 
+use std::convert::TryInto;
+
 use crate::prelude::pretty::punctuate;
 
 use super::{
-    literal::Literal, name::Name, pattern::Pat, Newtype,
-    Operator, Token,
+    literal::Literal,
+    name::Name,
+    pattern::{Morpheme, Pat},
+    Newtype, Operator, Token,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -41,8 +45,8 @@ pub enum Expr {
     /// `Expr::List`s are equivalent to iterating a lambda expression through a range of arguments specified by its *generators* (or *binders*, based on the field name `bind`) and filtered according to its *predicates* (field name `pred`).
     List {
         expr: Box<Expr>,
-        bind: Vec<Binding>,
-        pred: Vec<Expr>,
+        binds: Vec<Binding>,
+        preds: Vec<Expr>,
     },
     // unsure whether it's best to curry all lambda's during parsing
     Lam {
@@ -226,15 +230,14 @@ impl std::fmt::Display for Expr {
                 punctuate(',', xs, f)?;
                 write!(f, "]")
             }
-            Expr::List { expr, bind, pred } => {
-                todo!();
+            Expr::List { expr, binds, preds } => {
                 write!(f, "[ ")?;
                 write!(f, "{} |", expr)?;
-                if !bind.is_empty() {
+                if !binds.is_empty() {
                     // punctuate(",", bind, f)?;
                 }
-                if !pred.is_empty() {
-                    punctuate(",", pred, f)?;
+                if !preds.is_empty() {
+                    punctuate(",", preds, f)?;
                 }
                 write!(f, " ]")
             }

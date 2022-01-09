@@ -26,6 +26,8 @@ uncurry f x y = \(x, y) -> f x y
 
 */
 
+type ClassConstraints = Vec<Constraint<Name, Name>>;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Decl {
     Infix {
@@ -34,7 +36,7 @@ pub enum Decl {
     },
     Data {
         name: Name,
-        constraints: Vec<Constraint<Name>>,
+        constraints: Vec<Constraint<Name, Name>>,
         poly: Vec<Name>,
         variants: Vec<DataVariant>,
         derives: Vec<Name>,
@@ -47,7 +49,7 @@ pub enum Decl {
     },
     Class {
         name: Name,
-        constraints: Vec<Constraint<Name>>,
+        constraints: Vec<Constraint<Name, Name>>,
         defs: Vec<Clause<Pat, Expr, Decl>>,
     },
     Function {
@@ -61,11 +63,10 @@ pub enum Decl {
     },
     Instance {
         who: Type,
-        constraints: Vec<Constraint<Name>>,
+        constraints: Vec<Constraint<Name, Name>>,
         defs: Vec<Clause<Pat, Expr, Decl>>,
     },
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Stmt {
@@ -86,20 +87,29 @@ pub struct Clause<P, E, D> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DataVariant {
     pub ctor: Name,
-    pub args: Either<DataPat, ()>,
+    pub args: Option<DataPats>,
 }
 
 pub type FieldPat = (Name, Type);
 pub type Type = SigPat<Name>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum DataPat {
+pub enum DataPats {
     Args(Vec<Type>),
     Keys(Vec<FieldPat>),
+}
+
+impl DataPats {
+    fn len(&self) -> usize {
+        match self {
+            DataPats::Args(xs) => xs.len(),
+            DataPats::Keys(xs) => xs.len(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TyParam<T> {
     Just(T),
-    Given(Constraint<T>),
+    Given(T, T),
 }

@@ -205,3 +205,9 @@ where
         }
     }
 }
+
+impl<L> From<Either<L, ()>> for Option<L> {
+    fn from(either: Either<L, ()>) -> Self {
+        either.resolve(|l| Some(l), |_| None)
+    }
+}

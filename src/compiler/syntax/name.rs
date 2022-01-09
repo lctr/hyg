@@ -11,7 +11,7 @@ pub enum Name {
     /// Used for operators
     Infix(Operator),
     /// Used for data constructors
-    Cons(Symbol),
+    Data(Symbol),
     /// Used for classes -- play same syntactic role as TyCons,
     /// but within constraints?
     Class(Symbol),
@@ -24,7 +24,7 @@ impl std::fmt::Display for Name {
     ) -> std::fmt::Result {
         match self {
             Name::Ident(s)
-            | Name::Cons(s)
+            | Name::Data(s)
             | Name::Class(s) => {
                 write!(f, "{}", s)
             }
@@ -38,7 +38,7 @@ impl std::convert::TryFrom<Token> for Name {
     fn try_from(value: Token) -> Result<Self, Self::Error> {
         match value {
             Token::Lower(s) => Ok(Name::Ident(s)),
-            Token::Upper(s) => Ok(Name::Cons(s)),
+            Token::Upper(s) => Ok(Name::Data(s)),
             Token::Operator(o) => Ok(Name::Infix(o)),
             t => Err(TokenError::Incompatible(format!("Failed Token -> Var conversion! Expected either `Ident`, `Sym`, or `Operator` variant, but found {:?}", t)))
         }

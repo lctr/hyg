@@ -23,6 +23,7 @@ strenum! { Keyword is_kw ::
     Fn      "fn"
     Import  "import"
     Export  "export"
+    Type    "type"
     InfixL  "infixl"
     InfixR  "infixr"
     Derive  "deriving"

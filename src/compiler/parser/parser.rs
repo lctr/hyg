@@ -18,16 +18,16 @@ use crate::{
                 Binding, Expr, Match, Section
             }, 
             decl::{
-                Decl, DataVariant, Type, DataPat, TyParam, Clause
+                Decl, DataVariant, Type, DataPats, TyParam, Clause
             },
             pattern::{Pat, Constraint}, 
             literal::Literal, 
             error::SyntaxError,
             fixity::{
                 Fixity, FixityTable, Prec
-            }, 
+            }, ast::Ast, 
         }
-    }, prelude::{either::Either, traits::Intern, symbol::{Symbol, Lexicon}}, 
+    }, prelude::{either::Either, traits::Intern, symbol::{Symbol, Lexicon, Lexeme}}, 
 };
 
 pub use super::{
@@ -64,7 +64,7 @@ impl<'t> Peek for Parser<'t> {
         self.lexer.peek()
     }
     fn is_done(&mut self) -> bool {
-        self.lexer.is_done() || matches!(self.peek(), Some(Token::Eof))
+        self.match_curr(&Token::Eof)
     }
 }
 
@@ -135,20 +135,28 @@ impl<'t> From<Lexer<'t>> for Parser<'t> {
 
 trait TokenLookup {
     fn lookup_str(&self, lexicon: &Lexicon) -> String;
+
+    fn get_symbol(&self) -> Option<Symbol>;
 }
 
 impl TokenLookup for Token {
     fn lookup_str(&self, lexicon: &Lexicon) -> String {
-        match self {
-            Token::Upper(s) | Token::Lower(s) | Token::Operator(Operator::Custom(s)) => lexicon[*s].into(),
-            _ => format!("{}", self)
-        }
+        Token::display(&self, lexicon)
     }
+
+    fn get_symbol(&self) -> Option<Symbol> {
+        Token::get_symbol(&self)
+    }
+    
 }
 
 impl TokenLookup for Option<&Token> {
     fn lookup_str(&self, lexicon: &Lexicon) -> String {
         self.and_then(|t| Some(t.lookup_str(lexicon))).unwrap()
+    }
+
+    fn get_symbol(&self) -> Option<Symbol> {
+        self.and_then(|t|t.get_symbol())
     }
 }
 
@@ -161,8 +169,28 @@ impl<'t> Parser<'t> {
         }
     }
 
-    pub fn parse() -> Result<(), SyntaxError> {
-        todo!()
+    /// Finalizer for `Parser`; for when parsing session is complete, and 
+    /// inner resources are returned and taken ownership of. 
+    /// If this method is called when the Parser is not complete, a 
+    /// `None` is returned.
+    pub fn finalize(mut self) ->Option<(Lexicon, FixityTable, Vec<Comment>)> {
+        if !self.is_done() { 
+            None 
+        } else {
+            let lexicon = self.lexer.lexicon;
+            let fixities = self.fixities;
+            let comments = self.comments;
+            Some((lexicon, fixities, comments))
+        }
+    }
+
+    pub fn parse(&mut self) -> Parsed<Ast> {
+        let mut ast = Ast::default();
+        loop {
+            if self.is_done() { break; }
+            ast.push_decl(self.declaration()?);
+        }
+        Ok(ast)
     }
 
     //-------- DECLARATIONS
@@ -430,7 +458,7 @@ impl<'t> Parser<'t> {
             }
             Some(Upper(_)) => {
                 let s = self.take_next().get_symbol().unwrap();
-                Ok(Type::TyCon(Name::Cons(s)))
+                Ok(Type::TyCon(Name::Data(s)))
             }
             Some(Underscore) => self.with_next(|_, _| Ok(Type::Anon)),
 
@@ -447,7 +475,7 @@ impl<'t> Parser<'t> {
         let name = match self.peek() {
             Some(Token::Upper(_)) => {
                 let sym = self.take_next().get_symbol().unwrap();
-                Ok(Name::Cons(sym))
+                Ok(Name::Data(sym))
             }
             t => {
                 Err(SyntaxError(format!(
@@ -476,7 +504,7 @@ impl<'t> Parser<'t> {
         let name = match self.peek() {
             Some(Token::Upper(_)) => {
                 let sym = self.take_next().get_symbol().unwrap();
-                Ok(Name::Cons(sym))
+                Ok(Name::Data(sym))
             }
             t => {
                 Err(SyntaxError(format!(
@@ -536,7 +564,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn ty_constraints(&mut self) -> Parsed<Vec<Constraint<Name>>> {
+    fn ty_constraints(&mut self) -> Parsed<Vec<Constraint<Name, Name>>> {
         let constraints = self.delimited(Token::ParenL, Token::Comma, Token::ParenR, 
                 |parser| {
                     let loc = parser.loc();
@@ -610,7 +638,7 @@ impl<'t> Parser<'t> {
     fn maybe_derive_clause(
         &mut self, 
         name: Name, 
-        constraints: Vec<Constraint<Name>>, 
+        constraints: Vec<Constraint<Name, Name>>, 
         poly: Vec<Name>, 
         variants: Vec<DataVariant>
     ) -> Parsed<Decl> {
@@ -644,7 +672,7 @@ impl<'t> Parser<'t> {
                 }
                 Some(Token::Upper(_)) => {
                     let s = self.take_next().get_symbol().unwrap();
-                    Ok(vec![Name::Cons(s)])
+                    Ok(vec![Name::Data(s)])
                 }
                 Some(t) => {
                     Err(SyntaxError(format!(
@@ -669,12 +697,12 @@ impl<'t> Parser<'t> {
         match self.peek() {
             Some(Token::Upper(_)) => {
                 // safe to unwrap since we know it's got an interned symbol
-                let ctor = Name::Cons(self.take_next().get_symbol().unwrap());
+                let ctor = Name::Data(self.take_next().get_symbol().unwrap());
 
                 if self.is_done() 
                 || matches!(self.peek(), Some(&Token::Pipe 
                     | &Token::Kw(..))) {
-                    return Ok(DataVariant { ctor, args: Either::Right(()) });
+                    return Ok(DataVariant { ctor, args: None });
                 }
 
                 if matches!(self.peek(), Some(&Token::CurlyL)) {
@@ -682,7 +710,7 @@ impl<'t> Parser<'t> {
                         .data_record_fields()
                         .and_then(|fields| Ok(DataVariant { 
                             ctor, 
-                            args: Either::Left(DataPat::Keys(fields))
+                            args: Some(DataPats::Keys(fields))
                         }));
                 }
 
@@ -704,7 +732,7 @@ impl<'t> Parser<'t> {
                     
                 }
                 
-                Ok(DataVariant { ctor, args: Either::Left(DataPat::Args(args)) })
+                Ok(DataVariant { ctor, args: Some(DataPats::Args(args)) })
             }
             Some(t) => {
                 Err(SyntaxError(format!(
@@ -779,7 +807,7 @@ impl<'t> Parser<'t> {
             }
             Some(Upper(_)) => {
                 let s = self.take_next().get_symbol().unwrap();
-                Ok(Type::TyCon(Name::Cons(s)))
+                Ok(Type::TyCon(Name::Data(s)))
             }
             Some(t) => {
                 Err(SyntaxError(format!(
@@ -1388,7 +1416,85 @@ impl<'t> Parser<'t> {
     }
 
     fn brackets(&mut self) -> Parsed<Expr> {
-        todo!()
+        self.eat(&Token::BrackL)?;
+        if self.match_curr(&Token::BrackR) {
+            return self.with_next(|_, _| Ok(Expr::Array(vec![])))
+        };
+
+        let first = self.expression()?;
+        
+        match self.peek() {
+            Some(Token::BrackR) => {
+                self.eat(&Token::BrackR)?;
+                Ok(Expr::Array(vec![first]))
+            }
+            Some(Token::Comma) => {
+                self.delimited(
+                    Token::Comma, Token::Comma, Token::BrackR, 
+                    Self::expression)
+                    .and_then(|mut rest| {
+                        rest.insert(0, first); 
+                        Ok(Expr::Array(rest))
+                    })
+            }
+            Some(Token::Pipe) => {
+                self.list_comprehension(first)
+            }
+            _ => {
+                let loc = self.loc();
+                let tok = self.peek();
+                Err(SyntaxError(format!(
+                    "Unclosed square brackets at {}! Expected either `]`, `,`, or `|`, but instead found `{:?}`.", loc, tok
+                )))
+            }
+        }
+    }
+
+    fn list_comprehension(&mut self, head: Expr) -> Parsed<Expr> {
+        self.eat(&Token::Pipe)?;
+        let expr = Box::new(head);
+        let mut binds = vec![];
+        let mut preds = vec![];
+        loop {
+            if self.match_curr(&Token::BrackR) { break; }
+            if self.is_done() { 
+                return Err(Self::unexpected_eof_while("parsing list comprehension! brackets were not closed", self.loc())); 
+            }
+            match self.peek() {
+                Some(Token::Upper(_) | Token::BrackL | Token::ParenL | &Token::Underscore) => {
+                    let pat = self.case_branch_pat()?;
+                    self.eat(&Token::ArrowL)?;
+                    let rhs = self.expression()?;
+                    binds.push(Binding { pat, expr: rhs })
+                }
+                Some(Token::Lower(_)) => {
+                    let loc = self.loc(); 
+                    let first = self.take_next();
+                    if self.match_curr(&Token::ArrowL) {
+                        let rhs = self.with_next(|_, p| p.expression())?;
+                        let binding = Binding { pat: Pat::Var(first), expr: rhs };
+                        binds.push(binding);
+
+                    } else {
+                        let ex = Expr::Ident(Name::Ident(first.get_symbol().unwrap()));
+                        let pred = self.maybe_app(loc, ex)?;
+                        preds.push(pred);
+                    }
+                }
+                _ => {
+                    preds.push(self.expression()?);
+                }
+            }
+
+            if self.match_curr(&Token::Comma) {
+                self.eat(&Token::Comma)?;
+            }
+
+        }
+        self.eat(&Token::BrackR)?;
+
+        let list = Expr::List { expr, binds, preds };
+        Ok(list)
     }
 
     fn terminal(&mut self) -> Parsed<Expr> {
@@ -1432,7 +1538,7 @@ impl<'t> Parser<'t> {
 
             Some(Token::Upper(_)) => {
                 let s = self.take_next().get_symbol().unwrap();
-                Ok(Expr::Ident(Name::Cons(s)))
+                Ok(Expr::Ident(Name::Data(s)))
             },
 
             Some(Token::Char(_) | Token::Str(_) | Token::Bytes(_) | Token::Num { .. }) => {
@@ -1758,6 +1864,13 @@ mod tests {
         });
     }
 
+    #[test]
+    fn try_bind_stmt() {
+        let src = "a <- b";
+        let mut parser = Parser::new(src);
+        let expr = parser.expression();
+        println!("{:#?}", expr)
+    }
    
     #[test]
     fn test_delimited() {
@@ -1854,18 +1967,18 @@ mod tests {
         let expected = vec![
             (
                 Name::Ident(syms[0]), 
-                Type::TyCon(Name::Cons(syms[1]))
+                Type::TyCon(Name::Data(syms[1]))
             ), 
             (
                 Name::Ident(syms[2]),
                 Type::Tuple(vec![
-                    Type::TyCon(Name::Cons(syms[3])), 
-                    Type::TyCon(Name::Cons(syms[3]))])
+                    Type::TyCon(Name::Data(syms[3])), 
+                    Type::TyCon(Name::Data(syms[3]))])
 
             ),
             (
                 Name::Ident(syms[4]),
-                Type::Apply(Box::new(Type::TyCon(Name::Cons(syms[5]))), 
+                Type::Apply(Box::new(Type::TyCon(Name::Data(syms[5]))), 
                     vec![
                         Type::Group(Box::new(
                             Type::Apply(
@@ -1876,7 +1989,7 @@ mod tests {
                                                 Type::Apply(
                                                     Box::new(
                                                     
-                                                    Type::TyCon(Name::Cons(syms[5]))
+                                                    Type::TyCon(Name::Data(syms[5]))
                                                     ),
                                                     vec![
                                                         Type::Var(Name::Ident(syms[6])),
@@ -1893,7 +2006,7 @@ mod tests {
             ),
             (
                 Name::Ident(syms[8]),
-                Type::Arrow(Box::new(Type::TyCon(Name::Cons(syms[1]))), Box::new(Type::TyCon(Name::Cons(syms[9]))))
+                Type::Arrow(Box::new(Type::TyCon(Name::Data(syms[1]))), Box::new(Type::TyCon(Name::Data(syms[9]))))
             )
         ];
 
@@ -1924,6 +2037,14 @@ mod tests {
     }
 
     #[test]
+    fn print_list_compr() {
+        let src = "[x | x <- [1, 2]]";
+        let mut parser = Parser::new(src);
+        let expr = parser.expression();
+        println!("{:#?}", expr)
+    }
+
+    #[test]
     fn test_alias_decl() {
        let src = "
        type Name = String 
@@ -1943,15 +2064,39 @@ mod tests {
 
     #[test]
     fn print_fn_decl() {
-        let src = "
-        mul 0 _ = 0
-        mul _ 0 = 0
-        mul x y = x * y 
+        let src = "\
+        mul 0 _ = 0\n\
+        mul _ 0 = 0\n\
+        mul x y = x * y\n\
         ";
         let mut parser = Parser::new(src);
         // while !parser.is_done() {
             let decl = parser.declaration(); 
             println!("{:#?}", decl);
+            println!("{:#?}", parser)
         // }
+    }
+
+    #[test]
+    fn print_parse() {
+        let src = "\
+        data Bool = True | False deriving (Eq, Show)\n\
+        \n\
+        sum :: Int -> Int -> Int\n\
+        sum x y = x + y\n\
+        \n\
+        mul :: Int -> Int -> Int\n\
+        mul 0 _ = 0\n\
+        mul _ 0 = -\n\
+        mul x y = x * y\n\
+        ";
+        let mut parser = Parser::new(src);
+        let ast = parser.parse();
+        println!("{:#?}", ast);
+        if let Some((lexicon, fixities, comments)) = parser.finalize() {
+            println!("lexicon: {:?}", lexicon);
+            println!("fixities: {:?}", fixities);
+            println!("comments: {:?}", comments);
+        };
     }
 }

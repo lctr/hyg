@@ -41,6 +41,27 @@ impl From<Symbol> for usize {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct Lexeme<'x>(pub Symbol, pub &'x Lexicon);
+
+impl<'x> std::fmt::Display for Lexeme<'x> {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "{}", &(self.1)[self.0])
+    }
+}
+
+impl<'x> std::fmt::Debug for Lexeme<'x> {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "#({}: {})", self.0, &(self.1)[self.0])
+    }
+}
+
 /// String interner. Instead of allocating a new string during the compilation
 /// process, all strings are instead interned and mapped to instances of type
 /// `Symbol`, which unlike `&str` and `String`, are [`Copy`] and additionally
